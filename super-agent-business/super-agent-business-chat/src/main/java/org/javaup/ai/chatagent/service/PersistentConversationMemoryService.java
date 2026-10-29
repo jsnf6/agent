@@ -93,7 +93,7 @@ public class PersistentConversationMemoryService implements ConversationMemorySe
         if (StrUtil.isBlank(conversationId)) {
             return emptyContext();
         }
-
+        //获取记忆配置（保留最近 4 轮对话的原文，单次压缩最多处理 6 轮，最近原文窗口的字符上限2200，长期摘要的字符上限1400。）
         ChatRagProperties.HistorySummaryProperties historySummaryProperties = properties.getHistorySummary();
         if (!historySummaryProperties.isEnabled()) {
 

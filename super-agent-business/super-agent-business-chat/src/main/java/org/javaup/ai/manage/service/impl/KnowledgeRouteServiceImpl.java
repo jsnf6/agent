@@ -70,6 +70,7 @@ public class KnowledgeRouteServiceImpl implements KnowledgeRouteService {
 
     @Override
     public KnowledgeRouteDecision route(String question, String rewriteQuestion) {
+        //原问题，重写后的问题，分词（按照标点符号），做向量化
         RouteQueryContext queryContext = buildQueryContext(question, rewriteQuestion);
         KnowledgeRouteDecision decision = new KnowledgeRouteDecision();
         if (queryContext.queryTerms().isEmpty()) {

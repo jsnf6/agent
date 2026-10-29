@@ -48,6 +48,7 @@ public class DocumentKafkaConsumer {
     public void consumeIndexBuild(String payload) {
         try {
 
+            //json反序列换
             DocumentIndexBuildMessage message = objectMapper.readValue(payload, DocumentIndexBuildMessage.class);
 
             asyncProcessService.handleIndexBuild(message.getDocumentId(), message.getTaskId(), message.getPlanId());

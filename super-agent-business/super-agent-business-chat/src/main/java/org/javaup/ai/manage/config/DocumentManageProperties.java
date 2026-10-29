@@ -63,6 +63,8 @@ public class DocumentManageProperties {
     @Data
     public static class StructureParsing {
 
+        private String provider = "docling";
+
         private Boolean llmDisambiguationEnabled = Boolean.TRUE;
 
         private Integer maxAmbiguousSignalsPerCall = 8;
@@ -74,6 +76,32 @@ public class DocumentManageProperties {
         private Double ambiguityConfidenceFloor = 0.45D;
 
         private Double ambiguityConfidenceCeil = 0.80D;
+
+        private Docling docling = new Docling();
+    }
+
+    @Data
+    public static class Docling {
+
+        private String baseUrl = "http://127.0.0.1:5001";
+
+        private String convertPath = "/v1/convert/file";
+
+        private Integer connectTimeoutMillis = 5000;
+
+        private Integer readTimeoutMillis = 300000;
+
+        private Boolean doOcr = Boolean.FALSE;
+
+        private String ocrEngine = "easyocr";
+
+        private String pdfBackend = "";
+
+        private String tableMode = "accurate";
+
+        private Boolean fallbackToTika = Boolean.TRUE;
+
+        private List<String> fileTypes = new ArrayList<>(List.of("pdf", "docx", "html", "md"));
     }
 
     @Data

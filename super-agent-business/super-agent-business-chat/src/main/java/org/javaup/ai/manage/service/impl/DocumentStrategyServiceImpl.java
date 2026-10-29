@@ -523,6 +523,7 @@ public class DocumentStrategyServiceImpl implements DocumentStrategyService {
                     headingStack.removeLast();
                 }
                 headingStack.addLast(classification.title());
+                //拼接结构节点名称（加>） 例如：用户管理 > 用户注册
                 currentSectionPath = composeSectionPath(baseSectionPath, String.join(" > ", headingStack));
                 currentChunk.append(trimmed).append('\n');
                 continue;

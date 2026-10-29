@@ -43,6 +43,7 @@ public class TaskInfo {
     private final RunnableConfig runnableConfig;
     private final ConversationTraceRecorder traceRecorder;
 
+    //绑定输出流
     private final Sinks.Many<String> sink;
     private final StreamEventMetadata eventMetadata;
     private final String leaseKey;

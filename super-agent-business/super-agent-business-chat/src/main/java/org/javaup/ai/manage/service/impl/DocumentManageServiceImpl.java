@@ -94,10 +94,14 @@ import org.javaup.exception.SuperAgentFrameException;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.LinkedHashMap;
@@ -107,6 +111,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * @program: 企业级别深度设计 AI Agent。添加 阿星不是程序员 微信，添加时备注 super 来获取项目的完整资料
@@ -118,6 +123,8 @@ import java.util.stream.Collectors;
 @AllArgsConstructor
 @Service
 public class DocumentManageServiceImpl implements DocumentManageService {
+
+    private static final long STALE_INDEX_TASK_MINUTES = 30L;
 
     private final SuperAgentDocumentMapper documentMapper;
 
@@ -295,7 +302,10 @@ public class DocumentManageServiceImpl implements DocumentManageService {
                 "当前文档存在进行中的任务，请等待任务结束后再删除。");
         }
 
-        storageService.deleteObjects(List.of(document.getObjectName(), document.getParseTextPath()));
+        List<String> objectNameList = Stream.of(document.getObjectName(), document.getParseTextPath())
+            .filter(StrUtil::isNotBlank)
+            .toList();
+        storageService.deleteObjects(objectNameList);
         vectorGateway.deleteByDocumentId(documentId);
 
         DocumentKeywordSearchGateway keywordSearchGateway = keywordSearchGatewayProvider.getIfAvailable();
@@ -550,8 +560,11 @@ public class DocumentManageServiceImpl implements DocumentManageService {
             .in(SuperAgentDocumentTask::getTaskStatus, DocumentTaskStatusEnum.NEW.getCode(), DocumentTaskStatusEnum.RUNNING.getCode())
             .eq(SuperAgentDocumentTask::getStatus, BusinessStatus.YES.getCode()));
         if (runningTaskCount > 0) {
-            throw new SuperAgentFrameException(DocumentManageCode.INDEX_TASK_RUNNING.getCode(),
-                DocumentManageCode.INDEX_TASK_RUNNING.getMsg());
+            long closedStaleTaskCount = closeStaleIndexTasks(document.getId());
+            if (runningTaskCount > closedStaleTaskCount) {
+                throw new SuperAgentFrameException(DocumentManageCode.INDEX_TASK_RUNNING.getCode(),
+                    DocumentManageCode.INDEX_TASK_RUNNING.getMsg());
+            }
         }
 
         SuperAgentDocumentStrategyPlan plan = planMapper.selectById(dto.getPlanId());
@@ -587,7 +600,13 @@ public class DocumentManageServiceImpl implements DocumentManageService {
             "索引构建任务已创建，等待异步执行。",
             Map.of("planId", dto.getPlanId(), "strategySnapshot", plan.getStrategySnapshot()));
 
-        kafkaProducer.sendIndexBuild(new DocumentIndexBuildMessage(document.getId(), taskId, dto.getPlanId()));
+        DocumentIndexBuildMessage indexBuildMessage = new DocumentIndexBuildMessage(document.getId(), taskId, dto.getPlanId());
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                kafkaProducer.sendIndexBuild(indexBuildMessage);
+            }
+        });
 
         return new DocumentIndexBuildVo(
             document.getId(),
@@ -599,6 +618,39 @@ public class DocumentManageServiceImpl implements DocumentManageService {
             document.getIndexStatus(),
             enumMsg(DocumentIndexStatusEnum.getRc(document.getIndexStatus()))
         );
+    }
+
+    private int closeStaleIndexTasks(Long documentId) {
+        Date threshold = Date.from(Instant.now().minus(STALE_INDEX_TASK_MINUTES, ChronoUnit.MINUTES));
+        List<SuperAgentDocumentTask> staleTaskList = taskMapper.selectList(new LambdaQueryWrapper<SuperAgentDocumentTask>()
+            .eq(SuperAgentDocumentTask::getDocumentId, documentId)
+            .eq(SuperAgentDocumentTask::getTaskType, DocumentTaskTypeEnum.BUILD_INDEX.getCode())
+            .in(SuperAgentDocumentTask::getTaskStatus, DocumentTaskStatusEnum.NEW.getCode(), DocumentTaskStatusEnum.RUNNING.getCode())
+            .eq(SuperAgentDocumentTask::getStatus, BusinessStatus.YES.getCode())
+            .lt(SuperAgentDocumentTask::getCreateTime, threshold));
+        if (staleTaskList.isEmpty()) {
+            return 0;
+        }
+        Date now = new Date();
+        for (SuperAgentDocumentTask staleTask : staleTaskList) {
+            staleTask.setTaskStatus(DocumentTaskStatusEnum.FAILED.getCode());
+            staleTask.setFinishTime(now);
+            staleTask.setErrorCode("TASK_TIMEOUT");
+            staleTask.setErrorMsg("任务长时间未执行完成，已自动终止，请重新构建索引。");
+            staleTask.setEditTime(now);
+            taskMapper.updateById(staleTask);
+
+            taskLogService.saveLog(staleTask.getId(), documentId,
+                staleTask.getCurrentStage(),
+                DocumentTaskEventTypeEnum.FAILED.getCode(),
+                DocumentLogLevelEnum.ERROR.getCode(),
+                DocumentOperatorTypeEnum.SYSTEM.getCode(),
+                null,
+                "索引构建任务长时间未执行，已自动终止，请重新构建索引。",
+                detail("staleMinutes", STALE_INDEX_TASK_MINUTES));
+        }
+        log.warn("已自动终止超时索引任务，documentId={}, taskCount={}", documentId, staleTaskList.size());
+        return staleTaskList.size();
     }
 
     @Override

@@ -109,14 +109,16 @@ public class BusinessChatService {
         StreamLaunchPlan launchPlan = null;
         boolean leaseClaimed = false;
         try {
-
+            //构建执行计划（校验参数，记录时间，构建租约）
             launchPlan = buildLaunchPlan(request);
-
+            //抢占会话租约
             leaseClaimed = claimConversationLease(launchPlan);
             if (!leaseClaimed) {
                 return rejectionFlux("该会话当前正在执行中，请稍后再试", launchPlan.getConversationId(), null);
             }
-
+            //启动会话（前面只是校验，这里才是真正的逻辑）
+            //看完了，好像不是真正的执行逻辑，只是接通了文字传输链路，ai->sink->flux->前端，同时开启订阅，activate会话
+            //漏了一个方法，这里面不仅开启了订阅，还开了续租，同时里面开始执行会话逻辑，就在
             BootstrapResult bootstrapResult = bootstrapConversation(launchPlan);
             if (StrUtil.isNotBlank(bootstrapResult.getRejectionMessage())) {
                 return rejectionFlux(bootstrapResult.getRejectionMessage(), launchPlan.getConversationId(), null);
@@ -144,6 +146,7 @@ public class BusinessChatService {
         ConversationExchangeView exchangeView = null;
         try {
 
+            //在数据库中记录会话流程
             exchangeView = conversationArchiveStore.startExchange(
                 launchPlan.getConversationId(),
                 launchPlan.getQuestion(),
@@ -152,6 +155,7 @@ public class BusinessChatService {
                 launchPlan.getSelectedDocumentName()
             );
 
+            //这里构建了对话信息，一个对话所属的会话信息，还有该会话中思考信息和工具信息，更多的是空，后面应该是贯穿整个链路的
             TaskInfo taskInfo = createTaskInfo(launchPlan, exchangeView);
 
             if (!chatRuntimeRegistry.register(taskInfo)) {
@@ -161,7 +165,8 @@ public class BusinessChatService {
                 releaseLeaseQuietly(launchPlan.getLeaseKey(), launchPlan.getLeaseOwnerToken());
                 return BootstrapResult.rejected("该会话当前正在执行中，请稍后再试");
             }
-
+            //构建会话对象信息，更多的是为后面的流程构建信息
+            //开始订阅输出流
             return BootstrapResult.ready(bindClientChannel(taskInfo));
         }
         catch (RuntimeException exception) {
@@ -279,6 +284,7 @@ public class BusinessChatService {
         }
     }
 
+    //终于一路追过来了，这边开始就是会话逻辑，具体在prepareExecutionPlan中
     private Flux<String> buildConversationExecution(TaskInfo taskInfo) {
         return Flux.defer(() -> {
 
@@ -300,13 +306,16 @@ public class BusinessChatService {
 
     private StreamLaunchPlan buildLaunchPlan(ChatRequestDto request) {
 
+        //就是判断问题是否为空
         String question = normalizeQuestion(request.getQuestion());
-
+        //就是给一个uuid作为会话id
         String conversationId = normalizeConversationId(request.getConversationId());
+        //总之就是验证chatmode必须是正常的，也就是open_chat/document/auto-document
         ChatQueryMode chatMode = parseRequiredChatMode(request.getChatMode());
-
+        //对文档的选择进行校验，比如auto-document不能选择文档，document必须选择文档且文档必须存在
         KnowledgeDocumentDescriptor selectedDocument = resolveSelectedDocument(chatMode, request.getSelectedDocumentId());
 
+        //记录时间，这个又不怎么耗时，到了需要的时候直接就能获取
         LocalDate currentDate = LocalDate.now(CHAT_ZONE_ID);
         String currentDateText = formatCurrentDate(currentDate);
         return new StreamLaunchPlan(
@@ -847,8 +856,11 @@ public class BusinessChatService {
 
     private ConversationExecutionPlan prepareExecutionPlan(TaskInfo taskInfo) {
 
+        //这个方法将记忆加载到executionPlan中，同时auto document模式下有一个主文档和多个候选文档，document有用户选择的文档。
+        //通过本地规则，判断检索方式：GRAPH_ONLY或GRAPH_THEN_EVALUATE或RETRIEVAL
         ConversationExecutionPlan executionPlan = chatPreparationOrchestrator.prepare(taskInfo);
 
+        //将上面的四部分和当前问题组合起来，形成一个完整的agent question
         executionPlan.setAgentQuestion(buildAgentQuestion(executionPlan));
         if (executionPlan.getSelectedDocumentId() != null
             && !Objects.equals(executionPlan.getSelectedDocumentId(), taskInfo.selectedDocumentId())) {

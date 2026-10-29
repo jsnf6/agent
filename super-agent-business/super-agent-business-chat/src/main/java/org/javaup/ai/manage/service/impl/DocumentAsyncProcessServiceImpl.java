@@ -542,14 +542,14 @@ public class DocumentAsyncProcessServiceImpl implements DocumentAsyncProcessServ
 
     private List<SuperAgentDocumentStrategyStep> listSteps(Long planId) {
         List<SuperAgentDocumentStrategyStep> stepList = stepMapper.selectList(new LambdaQueryWrapper<SuperAgentDocumentStrategyStep>()
-            .eq(SuperAgentDocumentStrategyStep::getPlanId, planId)
-            .eq(SuperAgentDocumentStrategyStep::getStatus, BusinessStatus.YES.getCode()));
+                .eq(SuperAgentDocumentStrategyStep::getPlanId, planId)
+                .eq(SuperAgentDocumentStrategyStep::getStatus, BusinessStatus.YES.getCode()));
         return stepList.stream()
-            .sorted(Comparator
-                .comparingInt((SuperAgentDocumentStrategyStep step) -> pipelineOrder(step.getPipelineType()))
-                .thenComparing(SuperAgentDocumentStrategyStep::getStepNo)
-                .thenComparing(SuperAgentDocumentStrategyStep::getId))
-            .toList();
+                .sorted(Comparator
+                        .comparingInt((SuperAgentDocumentStrategyStep step) -> pipelineOrder(step.getPipelineType()))
+                        .thenComparing(SuperAgentDocumentStrategyStep::getStepNo)
+                        .thenComparing(SuperAgentDocumentStrategyStep::getId))
+                .toList();
     }
 
     private int pipelineOrder(String pipelineType) {

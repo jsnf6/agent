@@ -243,11 +243,58 @@ Spring AI / LangChain4j 是好工具，但直接拿来用是远远不够！
 
 ## 第一步：上传和存储
 
-文件上传到 MinIO 对象存储后，通过 Kafka 异步触发解析任务。Apache Tika 负责处理 PDF、Word、PPT 等多种格式，把五花八门的文档统一转成干净的文本。PDF 里的表格、扫描件、双栏排版——每一个都是坑，Tika 帮你踩过了。
+文件上传到 MinIO 对象存储后，通过 Kafka 异步触发解析任务。默认由 Docling 负责 PDF、Word、HTML、Markdown 等格式的结构化解析，直接产出章节、列表、表格层级；Tika 保留为兜底解析器。PDF 里的表格、扫描件、双栏排版——每一个都是坑，Docling 和 Tika 一起帮你踩过了。
 
 并且可以配置 **知识域编码**、**知识域名称**、**业务分类**、**文档标签** 等元信息，后续检索和分析都能用得上。
 
 <img src="https://multimedia-javaup.cn/super-agent/screenshot/%E6%96%87%E6%A1%A3%E5%88%97%E8%A1%A8.png" width="100%" />
+
+### Docling 结构解析接入
+
+Docling 本身是 Python 项目，Java 侧不直接嵌入 Python 运行时，而是通过官方 `docling-serve` 的 HTTP 接口集成。Java 调用 `/v1/convert/file`，请求 `json + md` 两种产物，再把 `DoclingDocument` 的 `body / texts / groups / tables` 映射为项目现有的结构节点：
+
+| Docling 元素 | 项目结构节点 |
+| :--- | :--- |
+| `title` | 文档根节点；与文件名重复时自动去重 |
+| `section_header` | `SECTION`，按 `level` 还原父子层级 |
+| `list_item` | `LIST_ITEM`；命中“第 N 步/步骤 N”时升级为 `STEP` |
+| `table` | `LIST_ITEM`，标题取表格 caption，正文转 Markdown 表格 |
+| `text / code / formula` | 归入当前章节的 `contentText` |
+
+启动服务：
+
+```bash
+docker compose -f docker-compose-infra.yml up -d docling-serve
+```
+
+默认配置已经指向 `http://127.0.0.1:5001`。首次启动会下载 Docling 模型，耗时取决于网络和镜像缓存：
+
+```yaml
+app:
+  manage:
+    structure-parsing:
+      provider: docling
+      docling:
+        base-url: http://127.0.0.1:5001
+        do-ocr: false          # 扫描版 PDF 建议改为 true
+        table-mode: accurate
+        fallback-to-tika: true # docling-serve 不可用时自动回退 Tika
+        file-types: [pdf, docx, html, md]
+```
+
+需要临时切回原来的 Tika 规则识别时，设置环境变量 `DOCUMENT_STRUCTURE_PROVIDER=tika` 即可，无需改代码。TXT 和旧版 DOC 默认仍然走 Tika。
+
+国内网络下如果构建或拉取镜像较慢，可以这样加速：
+
+```bash
+# docling-serve 走南京大学 quay 镜像（DaoCloud 未收录该镜像）
+set DOCLING_SERVE_IMAGE=quay.nju.edu.cn/docling-project/docling-serve:v1.38.1
+docker compose -f docker-compose-infra.yml up -d docling-serve
+```
+
+- Docling 模型默认通过 `HF_ENDPOINT=https://hf-mirror.com` 下载，可在 `.env` 中覆盖。
+- Maven 依赖在 `~/.m2/settings.xml` 中配置阿里云镜像；本机已配置为 `https://maven.aliyun.com/repository/public`。
+- 日常增量构建可加 `-T 1C` 开启多模块并行，例如 `mvn -T 1C -DskipTests package`。
 
 ## 第二步：异步解析和策略推荐
 
@@ -437,7 +484,8 @@ Skills 体系让 Agent 的能力边界不再是固定的，而是可以**持续�
 | Redisson | 分布式 Redis 工具 | [https://redisson.org](https://redisson.org) |
 | Kafka | 异步消息队列 | [https://kafka.apache.org](https://kafka.apache.org) |
 | MinIO | 对象存储 | [https://min.io](https://min.io) |
-| Apache Tika | 多格式文档解析 | [https://tika.apache.org](https://tika.apache.org) |
+| Docling | 文档结构化解析 | [https://github.com/docling-project/docling](https://github.com/docling-project/docling) |
+| Apache Tika | 多格式文档解析兜底 | [https://tika.apache.org](https://tika.apache.org) |
 | 阿里云百炼 DashScope | 大模型服务 | [https://dashscope.aliyun.com](https://dashscope.aliyun.com) |
 | Tavily | 联网搜索服务 | [https://tavily.com](https://tavily.com) |
 | SiliconFlow | Rerank 精排服务（可选） | [https://siliconflow.cn](https://siliconflow.cn) |

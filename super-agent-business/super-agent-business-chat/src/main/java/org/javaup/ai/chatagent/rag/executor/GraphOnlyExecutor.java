@@ -54,9 +54,9 @@ public class GraphOnlyExecutor implements ConversationExecutor {
         DocumentNavigationDecision decision = plan == null ? null : plan.getNavigationDecision();
         if (plan == null || decision == null || decision.getStructureAnchor() == null || decision.getStructureAnchor().getStructureNodeId() == null) {
             log.info("GRAPH_ONLY 执行器直接返回无证据: planPresent={}, decisionPresent={}, structureNodeId={}",
-                plan != null,
-                decision != null,
-                decision == null || decision.getStructureAnchor() == null ? null : decision.getStructureAnchor().getStructureNodeId());
+                    plan != null,
+                    decision != null,
+                    decision == null || decision.getStructureAnchor() == null ? null : decision.getStructureAnchor().getStructureNodeId());
             return Flux.just(StrUtil.blankToDefault(plan == null ? "" : plan.getNoEvidenceReply(), "当前没有足够证据支持明确回答。"));
         }
         ExecutorEventSupport.publishThinking(taskInfo, streamEventWriter, "正在通过结构图直接查询章节关系。");

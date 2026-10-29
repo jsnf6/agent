@@ -83,7 +83,10 @@ public class ChatPreparationOrchestrator {
         this.documentKnowledgeService = documentKnowledgeService;
     }
 
+
+    //主要职责有构建ConversationExecutionPlan（对taskinfo的进一步加工），构建会话记忆（装载会话记忆与最近窗口）
     public ConversationExecutionPlan prepare(TaskInfo taskInfo) {
+        //这里taskinfo的作用就有了，这应该是对他的进一步加工。
         String conversationId = taskInfo.conversationId();
         String question = taskInfo.question();
         ChatQueryMode chatMode = taskInfo.chatMode();
@@ -99,6 +102,8 @@ public class ChatPreparationOrchestrator {
             : traceRecorder.startStage(ConversationTraceStageCode.MEMORY, chatMode == null ? "" : chatMode.name(), "正在装载会话记忆与最近窗口。", null);
         ConversationMemoryContext memoryContext;
         try {
+            //我成了，这个是加载会话记忆的，总共完成了四个部分，压缩会话记忆（总结payload），最近几轮会话记忆，最近几轮的回答，最近几轮的answer
+            //就看到这里了，加载对话记忆
             memoryContext = summarizeHistory(conversationId, traceRecorder);
             if (traceRecorder != null) {
                 traceRecorder.completeStage(memoryStage, "会话记忆装载完成。", Map.of(
@@ -182,7 +187,7 @@ public class ChatPreparationOrchestrator {
             }
             throw exception;
         }
-
+        //对重写后的result进行形式方面的处理
         String rewriteQuestion = rewriteResult == null ? safeText(question) : firstNonBlank(rewriteResult.getRewrittenQuestion(), safeText(question));
         List<String> rewriteSubQuestions = rewriteResult == null || rewriteResult.getSubQuestions() == null || rewriteResult.getSubQuestions().isEmpty()
             ? List.of(rewriteQuestion)
@@ -193,6 +198,7 @@ public class ChatPreparationOrchestrator {
         Long routedTaskId = selectedTaskId;
         List<Long> routedDocumentIds = routedDocumentId == null ? List.of() : List.of(routedDocumentId);
         List<Long> routedTaskIds = routedTaskId == null ? List.of() : List.of(routedTaskId);
+        //开始检索文档
         if (chatMode == ChatQueryMode.AUTO_DOCUMENT) {
             KnowledgeRouteDecision routeDecision = knowledgeRouteService.route(question, rewriteQuestion);
             knowledgeRouteService.recordAutoRoute(conversationId, taskInfo.exchangeId(), question, rewriteQuestion, routeDecision);
@@ -262,7 +268,8 @@ public class ChatPreparationOrchestrator {
         else if (chatMode == ChatQueryMode.DOCUMENT) {
             knowledgeRouteService.recordShadowRoute(conversationId, taskInfo.exchangeId(), selectedDocumentId, question, rewriteQuestion);
         }
-
+        //至此auto document有一个主文档和多个候选文档，document已有用户选择的文档
+        //通过本地规则，判断检索方式：GRAPH_ONLY或GRAPH_THEN_EVALUATE或RETRIEVAL
         ConversationTraceRecorder.StageHandle routeStage = traceRecorder == null
             ? null
             : traceRecorder.startStage(ConversationTraceStageCode.ROUTE, ExecutionMode.RETRIEVAL.name(), "正在判定图查询还是混合检索。", null);
