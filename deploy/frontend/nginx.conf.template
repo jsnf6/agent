@@ -1,0 +1,39 @@
+server {
+    listen 80;
+    server_name _;
+    charset utf-8;
+    client_max_body_size 512m;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    gzip on;
+    gzip_min_length 1k;
+    gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+
+    # 后端接口：/api/chat/**、/manage/document/**、/manage/knowledge/**
+    location /api/ {
+        proxy_pass http://${BACKEND_UPSTREAM};
+        include /etc/nginx/snippets/proxy-common.conf;
+    }
+
+    location /manage/ {
+        proxy_pass http://${BACKEND_UPSTREAM};
+        include /etc/nginx/snippets/proxy-common.conf;
+    }
+
+    # 仅代理管理台登录相关接口，避免和前端路由 /admin/login 冲突
+    location /admin/auth {
+        proxy_pass http://${BACKEND_UPSTREAM};
+        include /etc/nginx/snippets/proxy-common.conf;
+    }
+
+    location /assets/ {
+        expires 7d;
+        add_header Cache-Control "public, max-age=604800";
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
