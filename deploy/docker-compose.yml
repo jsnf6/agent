@@ -100,6 +100,28 @@ services:
       retries: 30
       start_period: 60s
 
+  kibana:
+    # Elasticsearch 可视化（可选）：docker compose --profile viz up -d kibana
+    profiles: ["viz"]
+    image: ${KIBANA_IMAGE:-docker.elastic.co/kibana/kibana:8.18.0}
+    container_name: sa-kibana
+    restart: unless-stopped
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      ELASTICSEARCH_USERNAME: kibana_system
+      ELASTICSEARCH_PASSWORD: ${KIBANA_ES_PASSWORD}
+      SERVER_HOST: 0.0.0.0
+      SERVER_NAME: sa-kibana
+      I18N_LOCALE: zh-CN
+      XPACK_SECURITY_ENCRYPTIONKEY: ${KIBANA_SECURITY_ENCRYPTION_KEY}
+      XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY: ${KIBANA_SAVED_OBJECTS_ENCRYPTION_KEY}
+      TZ: Asia/Shanghai
+    ports:
+      - "${KIBANA_PORT:-5601}:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
   neo4j:
     image: neo4j:5.26.4
     container_name: sa-neo4j

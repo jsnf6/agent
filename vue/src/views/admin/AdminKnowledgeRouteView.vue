@@ -290,7 +290,11 @@
             </template>
             <template v-if="drawerMode === 'edit'">
               <div class="form-grid">
-                <input v-model="scopeForm.scopeCode" placeholder="范围编码，例如 operation_rule" />
+                <input
+                  v-model="scopeForm.scopeCode"
+                  :disabled="Boolean(scopeForm.id)"
+                  :placeholder="scopeForm.id ? '范围编码（创建后不可修改）' : '范围编码，例如 operation_rule'"
+                />
                 <input v-model="scopeForm.scopeName" placeholder="范围名称，例如 运营规则" />
                 <input v-model="scopeForm.parentScopeCode" placeholder="父级编码，可空" />
                 <input v-model="scopeForm.aliases" placeholder="别名，英文逗号分隔" />
@@ -328,9 +332,17 @@
             </template>
             <template v-if="drawerMode === 'edit'">
               <div class="form-grid">
-                <input v-model="topicForm.topicCode" placeholder="主题编码" />
+                <input
+                  v-model="topicForm.topicCode"
+                  :disabled="Boolean(topicForm.id)"
+                  :placeholder="topicForm.id ? '主题编码（创建后不可修改）' : '主题编码'"
+                />
                 <input v-model="topicForm.topicName" placeholder="主题名称" />
-                <select v-model="topicForm.scopeCode">
+                <select
+                  v-model="topicForm.scopeCode"
+                  :disabled="Boolean(topicForm.id) && selectedTopicRelations.length > 0"
+                  :title="Boolean(topicForm.id) && selectedTopicRelations.length > 0 ? '请先解除该主题的全部文档关联，再调整所属范围' : ''"
+                >
                   <option value="">选择所属范围</option>
                   <option v-for="item in scopes" :key="item.scopeCode" :value="item.scopeCode">{{ item.scopeName }}</option>
                 </select>
@@ -408,7 +420,7 @@
                 </select>
                 <select v-model="relationForm.documentId">
                   <option value="">选择文档</option>
-                  <option v-for="item in documents" :key="item.documentId" :value="item.documentId">{{ item.documentName }}</option>
+                  <option v-for="item in relationDocumentOptions" :key="item.documentId" :value="item.documentId">{{ item.documentName }}</option>
                 </select>
                 <input v-model="relationForm.relationScore" placeholder="关联分数，例如 0.9200" />
                 <input v-model="relationForm.reason" placeholder="关联原因" />
@@ -444,7 +456,7 @@
           <template v-if="drawerType === 'relation'">
             <template v-if="drawerMode === 'view'">
               <button class="primary-button" type="button" @click="switchDrawerToEdit">编辑</button>
-              <button class="ghost-button ghost-danger" type="button" :disabled="actionLoading" @click="removeRelation(drawerTarget); closeDrawer()">移除</button>
+              <button class="ghost-button ghost-danger" type="button" :disabled="actionLoading" @click="removeRelation(drawerTarget, true)">移除</button>
             </template>
             <template v-else>
               <button class="primary-button" type="button" :disabled="actionLoading" @click="saveRelation">保存</button>
@@ -595,6 +607,7 @@ function openCreateDrawer(type) {
 }
 
 const scopeForm = reactive({
+  id: '',
   scopeCode: '',
   scopeName: '',
   parentScopeCode: '',
@@ -606,6 +619,7 @@ const scopeForm = reactive({
 })
 
 const topicForm = reactive({
+  id: '',
   topicCode: '',
   topicName: '',
   scopeCode: '',
@@ -629,6 +643,15 @@ const relationForm = reactive({
 
 const activeScope = computed(() => scopes.value.find((item) => item.scopeCode === activeScopeCode.value) || null)
 const activeTopic = computed(() => topics.value.find((item) => item.topicCode === activeTopicCode.value) || null)
+const relationDocumentOptions = computed(() => {
+  const topic = topics.value.find((item) => item.topicCode === relationForm.topicCode)
+  if (!topic?.scopeCode) {
+    return documents.value
+  }
+  return documents.value.filter((item) => {
+    return !item.knowledgeScopeCode || item.knowledgeScopeCode === topic.scopeCode
+  })
+})
 const filteredScopes = computed(() => {
   const keyword = scopeKeyword.value.trim().toLowerCase()
   if (!keyword) {
@@ -894,6 +917,13 @@ watch(
     if (currentTopic?.scopeCode) {
       activeScopeCode.value = currentTopic.scopeCode
     }
+    if (relationForm.documentId) {
+      const document = documents.value.find((item) => String(item.documentId) === String(relationForm.documentId))
+      if (document?.knowledgeScopeCode && currentTopic?.scopeCode
+        && document.knowledgeScopeCode !== currentTopic.scopeCode) {
+        relationForm.documentId = ''
+      }
+    }
   }
 )
 
@@ -922,6 +952,7 @@ function showNotice(message, type = 'info') {
 
 function resetScopeForm() {
   Object.assign(scopeForm, {
+    id: '',
     scopeCode: '',
     scopeName: '',
     parentScopeCode: '',
@@ -936,6 +967,7 @@ function resetScopeForm() {
 
 function resetTopicForm() {
   Object.assign(topicForm, {
+    id: '',
     topicCode: '',
     topicName: '',
     scopeCode: activeScopeCode.value || '',
@@ -1026,14 +1058,19 @@ async function saveScope() {
 }
 
 async function deleteScope() {
-  if (!activeScope.value || !window.confirm(`确认删除范围「${activeScope.value.scopeName}」吗？`)) {
+  const target = drawerTarget.value
+  if (!target || !window.confirm(`确认删除范围「${target.scopeName}」吗？`)) {
     return
   }
   await withAction(async () => {
-    await manageApi.deleteKnowledgeScope({
-      scopeCode: activeScope.value.scopeCode,
+    const deleted = await manageApi.deleteKnowledgeScope({
+      id: target.id,
+      scopeCode: target.scopeCode,
       operatorId: OPERATOR_ID
     })
+    if (!deleted) {
+      throw new Error('删除失败，数据可能已变化，请刷新后重试。')
+    }
     resetScopeForm()
     closeDrawer()
     await loadAll()
@@ -1051,14 +1088,19 @@ async function saveTopic() {
 }
 
 async function deleteTopic() {
-  if (!activeTopic.value || !window.confirm(`确认删除主题「${activeTopic.value.topicName}」吗？`)) {
+  const target = drawerTarget.value
+  if (!target || !window.confirm(`确认删除主题「${target.topicName}」吗？`)) {
     return
   }
   await withAction(async () => {
-    await manageApi.deleteKnowledgeTopic({
-      topicCode: activeTopic.value.topicCode,
+    const deleted = await manageApi.deleteKnowledgeTopic({
+      id: target.id,
+      topicCode: target.topicCode,
       operatorId: OPERATOR_ID
     })
+    if (!deleted) {
+      throw new Error('删除失败，数据可能已变化，请刷新后重试。')
+    }
     resetTopicForm()
     relationForm.topicCode = ''
     closeDrawer()
@@ -1151,15 +1193,19 @@ async function saveRelation() {
   }, '主题文档关联已保存')
 }
 
-async function removeRelation(item) {
-  await withAction(async () => {
+async function removeRelation(item, closeAfterRemove = false) {
+  const removed = await withAction(async () => {
     await manageApi.removeTopicDocumentRelation({
       topicCode: item.topicCode,
       documentId: item.documentId,
       operatorId: OPERATOR_ID
     })
     await loadRelations()
+    return true
   }, '主题文档关联已移除')
+  if (removed && closeAfterRemove) {
+    closeDrawer()
+  }
 }
 
 function documentMetaLine(item = {}) {

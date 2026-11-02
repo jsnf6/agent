@@ -47,6 +47,11 @@ public class DocumentNavigationElasticsearchIndexInitializer {
                 indexName, analyzer, searchAnalyzer);
         }
         catch (IOException exception) {
+            if (ElasticsearchIndexInitSupport.isAuthenticationFailure(exception)) {
+                log.error("Elasticsearch 认证失败（401/403），导航索引 [{}] 未初始化。请检查 app.manage.elasticsearch.username/password；"
+                    + "IDE 启动时需配置 ES_PASSWORD 环境变量，取值见 deploy/.env。", indexName);
+                return;
+            }
             if (isIkAnalyzer(analyzer) || isIkAnalyzer(searchAnalyzer)) {
                 log.warn("使用 IK 分词器创建导航索引失败，准备回退到 standard。原因: {}", exception.getMessage());
                 fallbackToStandard(indexName);

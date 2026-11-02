@@ -81,8 +81,8 @@ mybatis-plus:
 app:
   admin-auth:
     username: ${SUPER_AGENT_ADMIN_USERNAME:admin}
-    password: ${SUPER_AGENT_ADMIN_PASSWORD}
-    token-secret: ${SUPER_AGENT_ADMIN_TOKEN_SECRET}
+    password: ${SUPER_AGENT_ADMIN_PASSWORD:admin123456}
+    token-secret: ${SUPER_AGENT_ADMIN_TOKEN_SECRET:super-agent-admin-token-secret-change-me}
     token-expire-minutes: ${SUPER_AGENT_ADMIN_TOKEN_EXPIRE_MINUTES:720}
   preview-mode:
     enabled: ${SUPER_AGENT_PREVIEW_MODE_ENABLED:false}

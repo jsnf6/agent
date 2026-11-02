@@ -1,12 +1,12 @@
 # Super Agent 本地 Docker 部署
 
-把「文档问答 Agent」整套跑起来所需的编排都在这个目录里：基础设施（MySQL / Redis / Kafka / Elasticsearch / Neo4j / PGVector / MinIO）+ Docling 文档解析镜像 + 后端 Spring Boot 镜像 + 前端 Nginx 镜像。
+把「文档问答 Agent」整套跑起来所需的编排都在这个目录里：基础设施（MySQL / Redis / Kafka / Elasticsearch / Neo4j / PGVector / MinIO）+ Docling 文档解析镜像 + 后端 Spring Boot 镜像 + 前端 Nginx 镜像 + 可选 Kibana 可视化。
 
 ## 一、目录结构
 
 ```
 deploy/
-├── docker-compose.yml       # 整套编排（10 个服务）
+├── docker-compose.yml       # 整套编排（11 个服务，Kibana 在 viz profile）
 ├── .env                     # 账号密码、模型 Key、数据源、上游地址、端口映射
 ├── backend/                 # 后端镜像：Dockerfile + app.jar
 ├── frontend/                # 前端镜像：Dockerfile + nginx.conf.template + dist/
@@ -42,6 +42,8 @@ docker compose stop backend     # 释放 9082
 
 然后在 IDEA 里 Run `SuperBusinessChatAgentApplication`（或跑 `start-backend.bat`），照样访问 http://localhost:8088 。也可以额外用 `start-frontend.bat`（vite dev，5173，带热更新）。
 
+> IDEA 里直接 Run 不会读取 `.env`：需要在 Run Configuration 的 Environment variables 里补上 `.env` 中的 `ES_PASSWORD`、`ALI_BAI_LIAN_API_KEY` 等变量（或装 EnvFile 插件指向 `deploy\.env`）。漏配 `ES_PASSWORD` 时后端能启动，但访问 ES 会 401，日志会提示认证失败。`start-backend.bat` 已自动加载 `.env`，不受影响。
+
 `application.yaml` 的默认连接地址在这套编排下全部可用：
 
 | 应用里写的地址 | 实际连到 |
@@ -57,6 +59,8 @@ docker compose stop backend     # 释放 9082
 切回方式 A：`docker compose --profile app up -d`（直接 `docker compose up -d` 只起基础设施 + 前端，不会占用 9082）。
 
 > `docling` 不在 `app` profile 中：无论是否带 `--profile app`，`up.ps1` 都会启动 `sa-docling`。首次启动需要下载 Docling 模型，健康检查（`/ready`）通过前状态为 `starting`，变为 `healthy` 才表示模型已加载完成。
+
+> `kibana` 在独立的 `viz` profile 中，默认不启动：需要查看 ES 数据时执行 `docker compose --profile viz up -d kibana`，避免日常开发多占约 1GB 内存。
 
 > 两套 MySQL 是两份数据：方式 A 写在容器 MySQL（宿主机 13306），方式 B 写在本机原生 MySQL（3306）。想共用一份数据，把 `.env` 里的 `SPRING_DATASOURCE_URL` 改成注释里给的 `host.docker.internal:3306` 那行，再 `docker compose --profile app up -d backend`。
 
@@ -75,6 +79,7 @@ docker compose stop backend     # 释放 9082
 | PGVector | localhost:5432 | postgres / postgres，库 `super_agent_pgvector` |
 | MinIO 控制台 | http://localhost:9001 | minioadmin / minioadmin，API 端口 9000 |
 | Docling | http://localhost:5001 | docling-serve（含 UI）；后端容器通过 `docling:5001` 访问 |
+| Kibana | http://localhost:5601 | elastic / ***REMOVED***，ES 可视化；需 `--profile viz` |
 
 ## 四、常用命令
 
@@ -104,6 +109,10 @@ docker compose build docling
 docker compose up -d docling
 docker compose logs -f docling
 docker compose restart docling
+
+# ES 可视化（Kibana，可选）
+docker compose --profile viz up -d kibana
+docker compose logs -f kibana
 ```
 
 > 注意：`docker compose up -d frontend` 会因为 `depends_on` 顺带把后端容器也拉起来，占用 9082。开发时只用 `docker compose start frontend` 即可。
@@ -126,12 +135,51 @@ docker compose restart docling
 - 模型：首次启动从 `HF_ENDPOINT`（默认 `https://hf-mirror.com`）下载，缓存在 `sa-docling-cache` 卷（容器内 `/opt/app-root/src/.cache`），重建容器不会重复下载。
 - 开关：`.env` 的 `DOCUMENT_STRUCTURE_PROVIDER=docling` 启用 Docling，改为 `tika` 回退到原 Tika 规则解析；单次 Docling 调用失败时后端默认自动回退 Tika。
 
+### Kibana 查看 ES 数据
+
+Kibana 放在 `viz` profile 中，按需启动：
+
+```powershell
+cd E:\nex-agent\super-agent\deploy
+docker compose --profile viz up -d kibana
+docker compose logs -f kibana
+```
+
+打开 http://localhost:5601 ，用 `elastic` / `.env` 里的 `ES_PASSWORD` 登录。首次启动约 1-3 分钟。
+
+> Kibana 自身连 ES 用的是内置账号 `kibana_system`（密码见 `.env` 的 `KIBANA_ES_PASSWORD`），这是 8.x 的硬性要求：`elastic` 超级用户不能作为 Kibana 服务账号启动。浏览器登录仍用 `elastic`。已预建 `super-agent-*` 数据视图，登录后直接进 Discover 即可。
+
+查看数据：
+
+1. `Stack Management` → `Data Views` → `Create data view`，名称填 `super-agent-*`。
+2. 到 `Discover` 选择该数据视图，即可浏览文档并展开 `_source`。
+3. 也可以到 `Dev Tools` 执行：
+
+```json
+GET _cat/indices?v
+
+GET super-agent-document-navigation/_search
+{
+  "size": 5,
+  "query": { "match_all": {} }
+}
+```
+
+项目当前会写入三个 ES 索引：
+
+- `super-agent-document-keyword`：文档关键词/检索数据
+- `super-agent-document-navigation`：文档结构导航节点
+- `super-agent-knowledge-route`：知识路由
+
+不需要时停止：`docker compose stop kibana`。
+
 ## 六、已知取舍与注意事项
 
 - **Elasticsearch 用自建镜像**：工程用 Spring Boot 3.5 自带的 `elasticsearch-java 8.18` 客户端，服务端选 8.18.0；配置里 `analyzer=ik_max_word` / `search_analyzer=ik_smart`，官方镜像不带 IK，缺插件时 ES 直接抛 `mapper_parsing_exception` 导致后端起不来（代码里的回退只捕获 `IOException`，兜不住这个异常），因此 `elasticsearch/Dockerfile` 预装了 IK（`https://get.infini.cloud/elasticsearch/analysis-ik/8.18.0`）。
   - 想退回标准分词：给后端加 `APP_MANAGE_ELASTICSEARCH_ANALYZER=standard`、`APP_MANAGE_ELASTICSEARCH_SEARCH_ANALYZER=standard`，删掉三个索引后重启。
 - **镜像下载走国内镜像源**：本机直连 `registry-1.docker.io` 不通，Docker Desktop 配了加速源；Neo4j 官方 tag 经加速源会卡住，实际是 `docker.m.daocloud.io/library/neo4j:5.26.4` 拉取后重打 `neo4j:5.26.4` 标签。
 - **Docling 镜像走南京大学 quay 镜像**：`quay.m.daocloud.io` 未收录 `docling-serve`，因此默认使用 `quay.nju.edu.cn/docling-project/docling-serve:v1.38.1`；换源只需改 `.env` 的 `DOCLING_BASE_IMAGE` 后重建 `docling`。模型缓存卷 `sa-docling-cache` 首次下载后建议保留。
+- **Kibana 为可选组件**：放在 `viz` profile 中，镜像约 1GB、启动约占 1GB 内存；不查看 ES 数据时无需启动。
 - **宿主机 3306 已被原生 MySQL 占用**：容器版 MySQL 映射到 `MYSQL_PORT`（默认 13306）；方式 B 直接复用原生实例。
 - **Milvus 未启用**：当前后端只走 PGVector + Elasticsearch 双通道检索，仓库根目录那套 Milvus compose 不是运行依赖，未纳入，省约 2GB 镜像空间。
 
