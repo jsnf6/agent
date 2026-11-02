@@ -12,6 +12,8 @@ public interface KnowledgeRouteIndexService {
 
     void refreshIfNeeded();
 
+    void refreshNow();
+
     List<RouteLexicalHit> search(String routingText, String entityType, int size);
 
     void deleteDocumentRoute(Long documentId);

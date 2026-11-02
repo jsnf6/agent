@@ -15,6 +15,7 @@ import org.javaup.ai.manage.data.SuperAgentDocumentStrategyPlan;
 import org.javaup.ai.manage.data.SuperAgentDocumentStrategyStep;
 import org.javaup.ai.manage.data.SuperAgentDocumentTask;
 import org.javaup.ai.manage.data.SuperAgentDocumentTaskLog;
+import org.javaup.ai.manage.data.SuperAgentKnowledgeScopeNode;
 import org.javaup.ai.manage.data.SuperAgentTopicDocumentRelation;
 import org.javaup.ai.manage.dto.DocumentChunkQueryDto;
 import org.javaup.ai.manage.dto.DocumentChunkDetailQueryDto;
@@ -35,6 +36,7 @@ import org.javaup.ai.manage.mapper.SuperAgentDocumentStrategyPlanMapper;
 import org.javaup.ai.manage.mapper.SuperAgentDocumentStrategyStepMapper;
 import org.javaup.ai.manage.mapper.SuperAgentDocumentTaskLogMapper;
 import org.javaup.ai.manage.mapper.SuperAgentDocumentTaskMapper;
+import org.javaup.ai.manage.mapper.SuperAgentKnowledgeScopeNodeMapper;
 import org.javaup.ai.manage.mapper.SuperAgentTopicDocumentRelationMapper;
 import org.javaup.ai.manage.mq.DocumentKafkaProducer;
 import org.javaup.ai.manage.mq.message.DocumentIndexBuildMessage;
@@ -142,6 +144,8 @@ public class DocumentManageServiceImpl implements DocumentManageService {
 
     private final SuperAgentDocumentProfileMapper documentProfileMapper;
 
+    private final SuperAgentKnowledgeScopeNodeMapper knowledgeScopeNodeMapper;
+
     private final SuperAgentTopicDocumentRelationMapper topicDocumentRelationMapper;
 
     private final DocumentStorageService storageService;
@@ -190,6 +194,7 @@ public class DocumentManageServiceImpl implements DocumentManageService {
 
         byte[] fileBytes = getFileBytes(file);
         Long documentId = uidGenerator.getUid();
+        DocumentScopeSelection scopeSelection = resolveUploadScope(dto);
 
         StoredObjectInfo storedObjectInfo = storageService.uploadOriginalFile(
                 documentId, originalFileName, fileBytes, file.getContentType());
@@ -211,8 +216,8 @@ public class DocumentManageServiceImpl implements DocumentManageService {
         document.setCharCount(0);
         document.setTokenCount(0);
 
-        document.setKnowledgeScopeCode(StrUtil.trimToNull(dto.getKnowledgeScopeCode()));
-        document.setKnowledgeScopeName(StrUtil.trimToNull(dto.getKnowledgeScopeName()));
+        document.setKnowledgeScopeCode(scopeSelection.scopeCode());
+        document.setKnowledgeScopeName(scopeSelection.scopeName());
         document.setBusinessCategory(StrUtil.trimToNull(dto.getBusinessCategory()));
         document.setDocumentTags(StrUtil.trimToNull(dto.getDocumentTags()));
         document.setStatus(BusinessStatus.YES.getCode());
@@ -249,6 +254,29 @@ public class DocumentManageServiceImpl implements DocumentManageService {
         kafkaProducer.sendParseRoute(new DocumentParseRouteMessage(documentId, taskId));
 
         return uploadVo;
+    }
+
+    private DocumentScopeSelection resolveUploadScope(DocumentUploadDto dto) {
+        String scopeCode = StrUtil.trimToNull(dto == null ? null : dto.getKnowledgeScopeCode());
+        String scopeName = StrUtil.trimToNull(dto == null ? null : dto.getKnowledgeScopeName());
+        if (StrUtil.isBlank(scopeCode) && StrUtil.isBlank(scopeName)) {
+            return new DocumentScopeSelection(null, null);
+        }
+        LambdaQueryWrapper<SuperAgentKnowledgeScopeNode> wrapper = new LambdaQueryWrapper<SuperAgentKnowledgeScopeNode>()
+            .eq(SuperAgentKnowledgeScopeNode::getStatus, BusinessStatus.YES.getCode())
+            .last("LIMIT 1");
+        if (StrUtil.isNotBlank(scopeCode)) {
+            wrapper.eq(SuperAgentKnowledgeScopeNode::getScopeCode, scopeCode);
+        }
+        else {
+            wrapper.eq(SuperAgentKnowledgeScopeNode::getScopeName, scopeName);
+        }
+        SuperAgentKnowledgeScopeNode scope = knowledgeScopeNodeMapper.selectOne(wrapper);
+        if (scope == null) {
+            throw new SuperAgentFrameException(BaseCode.PARAMETER_ERROR.getCode(),
+                "指定知识域不存在或已停用，请先在知识路由管理中维护。");
+        }
+        return new DocumentScopeSelection(scope.getScopeCode(), scope.getScopeName());
     }
 
     @Override
@@ -1185,5 +1213,8 @@ public class DocumentManageServiceImpl implements DocumentManageService {
             detailMap.put(String.valueOf(keyValues[index]), keyValues[index + 1]);
         }
         return detailMap;
+    }
+
+    private record DocumentScopeSelection(String scopeCode, String scopeName) {
     }
 }

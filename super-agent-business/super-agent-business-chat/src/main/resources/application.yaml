@@ -384,6 +384,38 @@ app:
       password: ${NEO4J_PASSWORD:12345678}
       database: neo4j
       query-timeout-seconds: 5
+    knowledge-binding:
+      # 文档导入后是否自动从人工维护的 scope/topic 中选择分类。不会自动创建新分类。
+      enabled: true
+      # 文档侧标题/章节标题/画像摘要与 scope/topic 的余弦相似度归一化区间。
+      cosine-floor: 0.25
+      cosine-ceil: 0.70
+      # scope 总分构成：标题语义、章节语义、摘要语义、关键词分级证据。
+      scope-weight-title: 0.40
+      scope-weight-heading: 0.25
+      scope-weight-summary: 0.20
+      scope-weight-lexical: 0.15
+      # 第一档：高置信。总分达到 0.55 且绝对领先第二名 0.08。
+      scope-high-confidence-score: 0.55
+      scope-high-confidence-gap: 0.08
+      # 第二档：清晰胜出。总分达到 0.42，相对领先 30%，绝对领先 0.10。
+      scope-clear-min-score: 0.42
+      scope-clear-relative-gap: 0.30
+      scope-clear-gap: 0.10
+      # 第三档：强证据。总分达到 0.38，标题或章节命中 scope 身份词，且绝对领先 0.10。
+      scope-evidence-min-score: 0.38
+      scope-evidence-gap: 0.10
+      # topic 最低分和每篇文档最多绑定的主题数。
+      topic-min-score: 0.58
+      topic-max-count: 3
+      # 文档侧参与 scope 打分的章节标题数量。
+      heading-view-limit: 12
+      # topic 打分时最多使用的章节证据数量。
+      section-evidence-limit: 30
+      # 每个章节作为 topic 证据时保留的前文字数。
+      section-lead-chars: 300
+      # 每个章节最多带入的步骤/列表项数量。
+      section-item-limit: 8
 
 logging:
   level:

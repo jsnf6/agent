@@ -30,6 +30,8 @@ public class DocumentManageProperties {
 
     private Neo4j neo4j = new Neo4j();
 
+    private KnowledgeBinding knowledgeBinding = new KnowledgeBinding();
+
     @Data
     public static class Minio {
         private String endpoint = "http://127.0.0.1:9000";
@@ -168,5 +170,49 @@ public class DocumentManageProperties {
         private String database = "neo4j";
 
         private Integer queryTimeoutSeconds = 5;
+    }
+
+    @Data
+    public static class KnowledgeBinding {
+
+        private Boolean enabled = Boolean.TRUE;
+
+        private Double cosineFloor = 0.25D;
+
+        private Double cosineCeil = 0.70D;
+
+        private Double scopeWeightTitle = 0.40D;
+
+        private Double scopeWeightHeading = 0.25D;
+
+        private Double scopeWeightSummary = 0.20D;
+
+        private Double scopeWeightLexical = 0.15D;
+
+        private Double scopeHighConfidenceScore = 0.55D;
+
+        private Double scopeHighConfidenceGap = 0.08D;
+
+        private Double scopeClearMinScore = 0.42D;
+
+        private Double scopeClearRelativeGap = 0.30D;
+
+        private Double scopeClearGap = 0.10D;
+
+        private Double scopeEvidenceMinScore = 0.38D;
+
+        private Double scopeEvidenceGap = 0.10D;
+
+        private Double topicMinScore = 0.58D;
+
+        private Integer topicMaxCount = 3;
+
+        private Integer headingViewLimit = 12;
+
+        private Integer sectionEvidenceLimit = 30;
+
+        private Integer sectionLeadChars = 300;
+
+        private Integer sectionItemLimit = 8;
     }
 }

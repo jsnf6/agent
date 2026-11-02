@@ -21,6 +21,7 @@ import org.javaup.ai.manage.mapper.SuperAgentDocumentStrategyPlanMapper;
 import org.javaup.ai.manage.mapper.SuperAgentDocumentStrategyStepMapper;
 import org.javaup.ai.manage.mapper.SuperAgentDocumentTaskMapper;
 import org.javaup.ai.manage.service.DocumentAsyncProcessService;
+import org.javaup.ai.manage.service.DocumentKnowledgeBindingService;
 import org.javaup.ai.manage.service.DocumentNavigationIndexService;
 import org.javaup.ai.manage.service.DocumentParserService;
 import org.javaup.ai.manage.service.DocumentProfileService;
@@ -30,6 +31,7 @@ import org.javaup.ai.manage.service.DocumentStructureGraphProjectionService;
 import org.javaup.ai.manage.service.DocumentStructureNodeService;
 import org.javaup.ai.manage.service.DocumentTaskLogService;
 import org.javaup.ai.manage.service.DocumentVectorGateway;
+import org.javaup.ai.manage.service.KnowledgeRouteIndexService;
 import org.javaup.ai.manage.service.keyword.DocumentKeywordSearchGateway;
 import org.javaup.ai.manage.support.ChunkCandidate;
 import org.javaup.ai.manage.support.DocumentAnalysisResult;
@@ -105,6 +107,10 @@ public class DocumentAsyncProcessServiceImpl implements DocumentAsyncProcessServ
     private final ObjectProvider<DocumentStructureGraphProjectionService> graphProjectionServiceProvider;
 
     private final DocumentProfileService documentProfileService;
+
+    private final DocumentKnowledgeBindingService documentKnowledgeBindingService;
+
+    private final ObjectProvider<KnowledgeRouteIndexService> knowledgeRouteIndexServiceProvider;
 
     @Resource
     private UidGenerator uidGenerator;
@@ -234,6 +240,8 @@ public class DocumentAsyncProcessServiceImpl implements DocumentAsyncProcessServ
             document.setLastParseTaskId(taskId);
             document.setStructureNodeCount(structureNodeCount);
             documentMapper.updateById(document);
+
+            documentKnowledgeBindingService.bind(documentId, analysisResult, structureNodes);
 
             finishTaskSuccess(task, DocumentTaskStageEnum.STRATEGY_ROUTE.getCode(), startTime);
             taskLogService.saveLog(taskId, documentId,
@@ -408,6 +416,8 @@ public class DocumentAsyncProcessServiceImpl implements DocumentAsyncProcessServ
             document.setIndexStatus(DocumentIndexStatusEnum.BUILD_SUCCESS.getCode());
             document.setLastIndexTaskId(taskId);
             documentMapper.updateById(document);
+
+            refreshKnowledgeRouteIndex(documentId);
 
             finishTaskSuccess(task, DocumentTaskStageEnum.STORE_COMPLETE.getCode(), startTime);
             taskLogService.saveLog(taskId, documentId,
@@ -602,6 +612,19 @@ public class DocumentAsyncProcessServiceImpl implements DocumentAsyncProcessServ
         }
         else {
             log.info("跳过结构图投影，因为图服务未启用: documentId={}, parseTaskId={}", documentId, parseTaskId);
+        }
+    }
+
+    private void refreshKnowledgeRouteIndex(Long documentId) {
+        KnowledgeRouteIndexService routeIndexService = knowledgeRouteIndexServiceProvider.getIfAvailable();
+        if (routeIndexService == null) {
+            return;
+        }
+        try {
+            routeIndexService.refreshNow();
+        }
+        catch (Exception exception) {
+            log.warn("索引构建完成后刷新知识路由索引失败，将在后续查询时重试: documentId={}", documentId, exception);
         }
     }
 
