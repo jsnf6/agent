@@ -118,6 +118,10 @@ app:
       3. 回答尽量结构化、清晰、简洁，适合直接返回给前端展示。
       4. 不要在最终答案中暴露工具调用细节或内部推理格式。
       5. 当已有信息足够时，直接给出最终答案，不要重复调用工具。
+      6. 需要读取某个具体网页的正文、点击按钮或填写表单时，使用 browser_open、browser_snapshot、browser_click、browser_type 等浏览器工具；仅需要检索公开资料时，优先使用 tavily_search。
+      7. 调用 browser_open 必须提供完整的 http/https URL，不要臆造网址。每次点击、输入、按键或后退后，必须使用工具返回的最新页面快照和元素 ref，不要复用旧 ref。
+      8. 只访问与用户问题直接相关的页面和链接。遇到登录、验证码、权限限制或安全验证时停止操作并说明原因，不要尝试绕过。
+      9. 完成网页操作后，如不再需要当前页面，可调用 browser_close 释放资源；最终回答中注明实际访问的网页 URL。
     # 推荐问题生成模型使用的独立提示词。
     # 这部分不参与主回答，只在主回答结束后用于生成 follow-up questions。
     recommendation-prompt: |
@@ -416,6 +420,88 @@ app:
       section-lead-chars: 300
       # 每个章节最多带入的步骤/列表项数量。
       section-item-limit: 8
+    knowledge-route:
+      # 问题路由与文档导入共用同一套 embedding，但使用独立的归一化区间和阈值。
+      cosine-floor: 0.25
+      cosine-ceil: 0.80
+      # scope 得分 = 语义相似度 * 0.70 + 词面/别名匹配 * 0.30。
+      scope-semantic-weight: 0.70
+      scope-lexical-weight: 0.30
+      # topic 自身得分 = 语义 * 0.75 + 词面/别名 * 0.25。
+      topic-semantic-weight: 0.75
+      topic-lexical-weight: 0.25
+      # topic 最终得分 = 自身得分 * 0.70 + 父 scope 得分 * 0.30。
+      topic-own-weight: 0.70
+      topic-parent-weight: 0.30
+      # 文档得分 = 文档语义 * 0.55 + 文档词面 * 0.20 + scope 对齐 * 0.15 + topic 关系 * 0.10。
+      document-semantic-weight: 0.55
+      document-lexical-weight: 0.20
+      document-scope-weight: 0.15
+      document-topic-weight: 0.10
+      # 最终置信度 = 文档分数 * 0.55 + 文档领先比例 * 0.25 + top scope * 0.12 + top topic * 0.08。
+      confidence-document-weight: 0.55
+      confidence-gap-weight: 0.25
+      confidence-scope-weight: 0.12
+      confidence-topic-weight: 0.08
+      # ES BM25 原始分归一化饱和参数，以及路由成功阈值。
+      es-lexical-saturation: 20
+      success-threshold: 0.55
+      # 两个不同 scope 的文档分差低于 top1 的 15% 时进入澄清。
+      clarification-relative-gap: 0.15
+      # 逐级候选收缩数量：scope 展示前 3，topic 只在前 3 个 scope 内，文档只在前 3 个 scope 内。
+      scope-candidate-limit: 3
+      topic-scope-limit: 3
+      topic-candidate-limit: 8
+      document-scope-limit: 3
+      document-candidate-limit: 5
+  browser:
+    # 是否启用 Playwright 浏览器工具。
+    enabled: true
+    # 容器和本地默认使用无头模式。
+    headless: true
+    # Docker 中以 root 运行时设置为 true；本地桌面环境保持 false。
+    no-sandbox: false
+    # 单次页面操作的超时时间，毫秒。
+    timeout-ms: 15000
+    # 按 conversationId 隔离的浏览器会话空闲回收时间。
+    session-ttl: 10m
+    # 空闲会话清理扫描间隔，秒。
+    cleanup-interval-seconds: 60
+    # 同时保留的最大浏览器会话数。
+    max-sessions: 20
+    # 返回给模型的最大页面文本长度。
+    max-snapshot-chars: 20000
+    # 单次快照最多返回的可交互元素数量。
+    max-elements: 200
+    # 单轮对话最多打开多少次页面。
+    max-open-calls-per-run: 2
+    # 同一会话累计最多打开多少次页面。
+    max-open-calls-per-thread: 8
+    # 单轮对话最多获取多少次页面快照。
+    max-snapshot-calls-per-run: 6
+    # 同一会话累计最多获取多少次页面快照。
+    max-snapshot-calls-per-thread: 24
+    # 单轮对话最多执行多少次点击、按键和后退操作。
+    max-action-calls-per-run: 6
+    # 同一会话累计最多执行多少次点击、按键和后退操作。
+    max-action-calls-per-thread: 24
+    # 单轮对话最多执行多少次表单输入。
+    max-type-calls-per-run: 3
+    # 同一会话累计最多执行多少次表单输入。
+    max-type-calls-per-thread: 12
+    viewport-width: 1280
+    viewport-height: 720
+    locale: zh-CN
+    # 默认阻止本机、内网、链路本地和云元数据地址，防止 SSRF。
+    block-private-network: true
+    allowed-schemes:
+      - http
+      - https
+    # 为空时允许所有公网主机；配置后仅允许白名单主机，支持 *.example.com。
+    allowed-hosts: []
+    launch-args:
+      - --disable-dev-shm-usage
+      - --disable-gpu
 
 logging:
   level:

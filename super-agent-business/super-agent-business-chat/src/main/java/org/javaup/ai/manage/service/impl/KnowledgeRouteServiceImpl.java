@@ -5,6 +5,7 @@ import cn.hutool.core.util.StrUtil;
 import com.baidu.fsg.uid.UidGenerator;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.extern.slf4j.Slf4j;
+import org.javaup.ai.manage.config.DocumentManageProperties;
 import org.javaup.ai.manage.data.SuperAgentDocument;
 import org.javaup.ai.manage.data.SuperAgentDocumentProfile;
 import org.javaup.ai.manage.data.SuperAgentKnowledgeRouteTrace;
@@ -23,6 +24,7 @@ import org.javaup.ai.manage.model.route.ScopeRouteCandidate;
 import org.javaup.ai.manage.model.route.TopicRouteCandidate;
 import org.javaup.ai.manage.service.KnowledgeRouteIndexService;
 import org.javaup.ai.manage.service.KnowledgeRouteService;
+import org.javaup.ai.manage.support.KnowledgeRouteScoringSupport;
 import org.javaup.enums.BusinessStatus;
 import org.javaup.enums.DocumentIndexStatusEnum;
 import org.springframework.ai.embedding.EmbeddingModel;
@@ -37,7 +39,6 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -64,6 +65,7 @@ public class KnowledgeRouteServiceImpl implements KnowledgeRouteService {
     private final SuperAgentKnowledgeTopicNodeMapper topicNodeMapper;
     private final SuperAgentTopicDocumentRelationMapper topicDocumentRelationMapper;
     private final SuperAgentKnowledgeRouteTraceMapper knowledgeRouteTraceMapper;
+    private final DocumentManageProperties properties;
     private final ObjectProvider<EmbeddingModel> embeddingModelProvider;
     private final ObjectProvider<KnowledgeRouteIndexService> knowledgeRouteIndexServiceProvider;
     private final UidGenerator uidGenerator;
@@ -84,12 +86,12 @@ public class KnowledgeRouteServiceImpl implements KnowledgeRouteService {
         decision.setScopes(scopeCandidates);
         decision.setTopics(topicCandidates);
         decision.setDocuments(documentCandidates);
-        BigDecimal confidence = resolveConfidence(documentCandidates);
+        BigDecimal confidence = resolveConfidence(documentCandidates, scopeCandidates, topicCandidates);
         decision.setConfidence(confidence);
         if (documentCandidates.isEmpty()) {
             decision.setRouteStatus("FAILED");
         }
-        else if (confidence.compareTo(BigDecimal.valueOf(0.55D)) < 0) {
+        else if (confidence.compareTo(BigDecimal.valueOf(properties.getKnowledgeRoute().getSuccessThreshold())) < 0) {
             decision.setRouteStatus("LOW_CONFIDENCE");
         }
         else {
@@ -194,17 +196,63 @@ public class KnowledgeRouteServiceImpl implements KnowledgeRouteService {
         if (nodes.isEmpty()) {
             return deriveScopesFromDocuments(queryContext);
         }
+        DocumentManageProperties.KnowledgeRoute config = properties.getKnowledgeRoute();
         List<String> routeTexts = nodes.stream()
-            .map(node -> join(node.getScopeName(), node.getDescription(), node.getAliases(), node.getExamples()))
+            .map(this::buildScopeRouteText)
             .toList();
-        List<Double> semanticScores = computeSemanticScores(queryContext, routeTexts);
+        List<Double> cosineScores = computeSemanticScores(queryContext, routeTexts);
+        boolean semanticAvailable = queryContext.semanticEnabled() && cosineScores.size() == nodes.size();
         Map<String, Double> lexicalScores = searchLexicalScores(queryContext.routingText(), "scope", 5).stream()
             .collect(Collectors.toMap(KnowledgeRouteIndexService.RouteLexicalHit::entityCode, KnowledgeRouteIndexService.RouteLexicalHit::score, (left, right) -> left));
-        return buildScopeCandidates(queryContext, nodes, routeTexts, semanticScores, lexicalScores);
+        List<ScopeRouteCandidate> candidates = new ArrayList<>(nodes.size());
+        for (int index = 0; index < nodes.size(); index++) {
+            SuperAgentKnowledgeScopeNode node = nodes.get(index);
+            String routeText = routeTexts.get(index);
+            double semanticScore = semanticAvailable
+                ? KnowledgeRouteScoringSupport.semanticUnit(
+                    cosineScores.get(index),
+                    config.getCosineFloor(),
+                    config.getCosineCeil())
+                : 0D;
+            KnowledgeRouteScoringSupport.LexicalEvidence localLexical = KnowledgeRouteScoringSupport.lexicalEvidence(
+                queryContext.routingText(),
+                routeText,
+                identityAliases(node.getScopeName(), node.getAliases())
+            );
+            double externalLexical = KnowledgeRouteScoringSupport.normalizedExternalLexical(
+                lexicalScores.getOrDefault(node.getScopeCode(), 0D),
+                config.getEsLexicalSaturation()
+            );
+            double lexicalScore = Math.max(localLexical.score(), externalLexical);
+            double score = KnowledgeRouteScoringSupport.weightedScore(
+                new double[]{
+                    semanticAvailable ? config.getScopeSemanticWeight() : 0D,
+                    config.getScopeLexicalWeight()
+                },
+                new double[]{semanticScore, lexicalScore}
+            );
+            if (score <= 0D) {
+                continue;
+            }
+            candidates.add(new ScopeRouteCandidate(
+                node.getScopeCode(),
+                node.getScopeName(),
+                scoreToBigDecimal(score),
+                "语义=" + round(semanticScore)
+                    + "；词面=" + round(lexicalScore)
+                    + (localLexical.aliasHit() ? "；命中别名=" + String.join("、", localLexical.matches()) : "")
+            ));
+        }
+        return candidates.stream()
+            .sorted(Comparator.comparing(ScopeRouteCandidate::getScore).reversed())
+            .limit(config.getScopeCandidateLimit())
+            .toList();
     }
 
     private List<ScopeRouteCandidate> deriveScopesFromDocuments(RouteQueryContext queryContext) {
         List<SuperAgentDocument> documents = listRetrievableDocuments();
+        DocumentManageProperties.KnowledgeRoute config = properties.getKnowledgeRoute();
+        boolean semanticAvailable = queryContext.semanticEnabled();
         Map<String, ScopeAccumulator> accumulatorMap = new LinkedHashMap<>();
         for (SuperAgentDocument document : documents) {
             if (StrUtil.isBlank(document.getKnowledgeScopeCode()) && StrUtil.isBlank(document.getKnowledgeScopeName())) {
@@ -212,182 +260,226 @@ public class KnowledgeRouteServiceImpl implements KnowledgeRouteService {
             }
             String code = firstNonBlank(document.getKnowledgeScopeCode(), "general_document");
             String name = firstNonBlank(document.getKnowledgeScopeName(), "通用文档");
-            String routeText = join(code, name, document.getBusinessCategory(), document.getDocumentTags());
-            double score = keywordEntityAssist(queryContext.queryTerms(), routeText);
+            String routeText = join(name, document.getBusinessCategory(), document.getDocumentTags());
             double semanticScore = semanticScore(queryContext, routeText);
+            double semanticUnit = semanticUnit(semanticScore, config);
+            KnowledgeRouteScoringSupport.LexicalEvidence lexicalEvidence = KnowledgeRouteScoringSupport.lexicalEvidence(
+                queryContext.routingText(),
+                routeText,
+                identityAliases(name, document.getDocumentTags())
+            );
+            double score = KnowledgeRouteScoringSupport.weightedScore(
+                new double[]{
+                    semanticAvailable ? config.getScopeSemanticWeight() : 0D,
+                    config.getScopeLexicalWeight()
+                },
+                new double[]{semanticUnit, lexicalEvidence.score()}
+            );
             ScopeAccumulator accumulator = accumulatorMap.computeIfAbsent(code, key -> new ScopeAccumulator(code, name));
-            if (score + semanticMainScore(semanticScore) > accumulator.maxScore) {
-                accumulator.maxScore = score + semanticMainScore(semanticScore);
-                accumulator.reason = buildReason(queryContext.queryTerms(), routeText, semanticScore);
+            if (score > accumulator.maxScore) {
+                accumulator.maxScore = score;
+                accumulator.reason = "由文档元数据兜底推导；语义=" + round(semanticUnit)
+                    + "；词面=" + round(lexicalEvidence.score());
             }
         }
         return accumulatorMap.values().stream()
-            .filter(item -> item.maxScore > 0D || queryContext.semanticEnabled())
+            .filter(item -> item.maxScore > 0D)
             .map(item -> new ScopeRouteCandidate(item.scopeCode, item.scopeName, scoreToBigDecimal(item.maxScore), item.reason))
-            .sorted((left, right) -> right.getScore().compareTo(left.getScore()))
-            .limit(5)
+            .sorted(Comparator.comparing(ScopeRouteCandidate::getScore).reversed())
+            .limit(config.getScopeCandidateLimit())
             .toList();
     }
 
     private List<TopicRouteCandidate> rankTopics(RouteQueryContext queryContext, List<ScopeRouteCandidate> scopeCandidates) {
+        if (scopeCandidates == null || scopeCandidates.isEmpty()) {
+            return List.of();
+        }
         List<SuperAgentKnowledgeTopicNode> nodes = topicNodeMapper.selectList(new LambdaQueryWrapper<SuperAgentKnowledgeTopicNode>()
             .eq(SuperAgentKnowledgeTopicNode::getStatus, BusinessStatus.YES.getCode()));
-        Set<String> preferredScopes = scopeCandidates.stream().map(ScopeRouteCandidate::getScopeCode).collect(Collectors.toSet());
         if (nodes.isEmpty()) {
-            return deriveTopicsFromProfiles(queryContext, preferredScopes);
+            return List.of();
         }
-        List<String> routeTexts = nodes.stream()
-            .map(node -> join(
-                node.getTopicName(),
-                node.getDescription(),
-                node.getAliases(),
-                node.getExamples(),
-                node.getAnswerShape(),
-                node.getExecutionPreference()
-            ))
+        DocumentManageProperties.KnowledgeRoute config = properties.getKnowledgeRoute();
+        List<ScopeRouteCandidate> scopedCandidates = scopeCandidates.stream()
+            .limit(config.getTopicScopeLimit())
             .toList();
-        List<Double> semanticScores = computeSemanticScores(queryContext, routeTexts);
+        Map<String, ScopeRouteCandidate> parentScopeMap = scopedCandidates.stream()
+            .collect(Collectors.toMap(ScopeRouteCandidate::getScopeCode, item -> item, (left, right) -> left));
+        List<SuperAgentKnowledgeTopicNode> eligibleTopics = nodes.stream()
+            .filter(topic -> parentScopeMap.containsKey(topic.getScopeCode()))
+            .toList();
+        if (eligibleTopics.isEmpty()) {
+            return List.of();
+        }
+        Map<String, String> scopeNameMap = scopeCandidates.stream()
+            .collect(Collectors.toMap(ScopeRouteCandidate::getScopeCode, ScopeRouteCandidate::getScopeName, (left, right) -> left));
+        List<String> routeTexts = eligibleTopics.stream()
+            .map(topic -> buildTopicRouteText(topic, scopeNameMap.get(topic.getScopeCode())))
+            .toList();
+        List<Double> cosineScores = computeSemanticScores(queryContext, routeTexts);
+        boolean semanticAvailable = queryContext.semanticEnabled() && cosineScores.size() == eligibleTopics.size();
         Map<String, Double> lexicalScores = searchLexicalScores(queryContext.routingText(), "topic", 8).stream()
             .collect(Collectors.toMap(KnowledgeRouteIndexService.RouteLexicalHit::entityCode, KnowledgeRouteIndexService.RouteLexicalHit::score, (left, right) -> left));
-        List<TopicRouteCandidate> candidates = new ArrayList<>(nodes.size());
-        for (int index = 0; index < nodes.size(); index++) {
-            SuperAgentKnowledgeTopicNode node = nodes.get(index);
+        List<TopicRouteCandidate> candidates = new ArrayList<>(eligibleTopics.size());
+        for (int index = 0; index < eligibleTopics.size(); index++) {
+            SuperAgentKnowledgeTopicNode node = eligibleTopics.get(index);
             String routeText = routeTexts.get(index);
-            double score = semanticMainScore(semanticScores.get(index))
-                + lexicalAssist(lexicalScores.get(node.getTopicCode()))
-                + keywordEntityAssist(queryContext.queryTerms(), routeText);
-            if (!preferredScopes.isEmpty() && preferredScopes.contains(node.getScopeCode())) {
-                score += 8D;
+            double semanticScore = semanticAvailable
+                ? semanticUnit(cosineScores.get(index), config)
+                : 0D;
+            KnowledgeRouteScoringSupport.LexicalEvidence localLexical = KnowledgeRouteScoringSupport.lexicalEvidence(
+                queryContext.routingText(),
+                routeText,
+                identityAliases(node.getTopicName(), node.getAliases())
+            );
+            double externalLexical = KnowledgeRouteScoringSupport.normalizedExternalLexical(
+                lexicalScores.getOrDefault(node.getTopicCode(), 0D),
+                config.getEsLexicalSaturation()
+            );
+            double lexicalScore = Math.max(localLexical.score(), externalLexical);
+            double ownScore = KnowledgeRouteScoringSupport.weightedScore(
+                new double[]{
+                    semanticAvailable ? config.getTopicSemanticWeight() : 0D,
+                    config.getTopicLexicalWeight()
+                },
+                new double[]{semanticScore, lexicalScore}
+            );
+            ScopeRouteCandidate parentScope = parentScopeMap.get(node.getScopeCode());
+            double parentScore = parentScope == null ? 0D : parentScope.getScore().doubleValue();
+            double score = KnowledgeRouteScoringSupport.weightedScore(
+                new double[]{config.getTopicOwnWeight(), config.getTopicParentWeight()},
+                new double[]{ownScore, parentScore}
+            );
+            if (score <= 0D) {
+                continue;
             }
-            if (score > 0D || queryContext.semanticEnabled()) {
-                candidates.add(new TopicRouteCandidate(
-                    node.getTopicCode(),
-                    node.getTopicName(),
-                    node.getScopeCode(),
-                    scoreToBigDecimal(score),
-                    buildReason(queryContext.queryTerms(), routeText, semanticScores.get(index))
-                ));
-            }
+            candidates.add(new TopicRouteCandidate(
+                node.getTopicCode(),
+                node.getTopicName(),
+                node.getScopeCode(),
+                scoreToBigDecimal(score),
+                "主题自身=" + round(ownScore)
+                    + "；父scope=" + round(parentScore)
+                    + "；语义=" + round(semanticScore)
+                    + "；词面=" + round(lexicalScore)
+                    + (localLexical.aliasHit() ? "；命中别名=" + String.join("、", localLexical.matches()) : "")
+            ));
         }
         return candidates.stream()
-            .sorted((left, right) -> right.getScore().compareTo(left.getScore()))
-            .limit(8)
-            .toList();
-    }
-
-    private List<TopicRouteCandidate> deriveTopicsFromProfiles(RouteQueryContext queryContext, Set<String> preferredScopes) {
-        List<SuperAgentDocumentProfile> profiles = documentProfileMapper.selectList(new LambdaQueryWrapper<SuperAgentDocumentProfile>()
-            .eq(SuperAgentDocumentProfile::getStatus, BusinessStatus.YES.getCode())
-            .eq(SuperAgentDocumentProfile::getProfileStatus, 2));
-        Map<String, TopicAccumulator> accumulatorMap = new LinkedHashMap<>();
-        Map<Long, SuperAgentDocument> documentMap = listRetrievableDocuments().stream()
-            .collect(Collectors.toMap(SuperAgentDocument::getId, item -> item));
-        for (SuperAgentDocumentProfile profile : profiles) {
-            SuperAgentDocument document = documentMap.get(profile.getDocumentId());
-            String scopeCode = document == null ? "" : StrUtil.blankToDefault(document.getKnowledgeScopeCode(), "");
-            for (String topic : parseJsonArray(profile.getCoreTopics())) {
-                String routeText = join(topic, profile.getDocumentSummary(), profile.getExampleQuestions());
-                double score = keywordEntityAssist(queryContext.queryTerms(), routeText);
-                double semanticScore = semanticScore(queryContext, routeText);
-                if (!preferredScopes.isEmpty() && preferredScopes.contains(scopeCode)) {
-                    score += 6D;
-                }
-                TopicAccumulator accumulator = accumulatorMap.computeIfAbsent(topic, key -> new TopicAccumulator(topic, scopeCode));
-                double finalScore = score + semanticMainScore(semanticScore);
-                if (finalScore > accumulator.maxScore) {
-                    accumulator.maxScore = finalScore;
-                    accumulator.reason = buildReason(queryContext.queryTerms(), routeText, semanticScore);
-                }
-            }
-        }
-        return accumulatorMap.values().stream()
-            .filter(item -> item.maxScore > 0D || queryContext.semanticEnabled())
-            .map(item -> new TopicRouteCandidate(normalizeCode(item.topicName), item.topicName, item.scopeCode, scoreToBigDecimal(item.maxScore), item.reason))
-            .sorted((left, right) -> right.getScore().compareTo(left.getScore()))
-            .limit(8)
+            .sorted(Comparator.comparing(TopicRouteCandidate::getScore).reversed())
+            .limit(config.getTopicCandidateLimit())
             .toList();
     }
 
     private List<DocumentRouteCandidate> rankDocuments(RouteQueryContext queryContext,
                                                        List<ScopeRouteCandidate> scopeCandidates,
                                                        List<TopicRouteCandidate> topicCandidates) {
-        List<SuperAgentDocument> documents = listRetrievableDocuments();
-        if (documents.isEmpty()) {
+        List<SuperAgentDocument> allDocuments = listRetrievableDocuments();
+        if (allDocuments.isEmpty()) {
             return List.of();
+        }
+        DocumentManageProperties.KnowledgeRoute config = properties.getKnowledgeRoute();
+        List<ScopeRouteCandidate> scopedCandidates = scopeCandidates == null
+            ? List.of()
+            : scopeCandidates.stream().limit(config.getDocumentScopeLimit()).toList();
+        Map<String, Double> scopeScoreMap = scopedCandidates.stream()
+            .collect(Collectors.toMap(ScopeRouteCandidate::getScopeCode,
+                item -> item.getScore().doubleValue(), (left, right) -> left));
+        double topScopeScore = scopedCandidates.isEmpty() ? 0D : scopedCandidates.get(0).getScore().doubleValue();
+        List<SuperAgentDocument> documents = scopeScoreMap.isEmpty()
+            ? allDocuments
+            : allDocuments.stream()
+                .filter(document -> scopeScoreMap.containsKey(StrUtil.blankToDefault(document.getKnowledgeScopeCode(), "")))
+                .toList();
+        boolean scopeFallback = false;
+        if (documents.isEmpty()) {
+            documents = allDocuments;
+            scopeFallback = true;
         }
         Map<Long, SuperAgentDocumentProfile> profileMap = documentProfileMapper.selectList(new LambdaQueryWrapper<SuperAgentDocumentProfile>()
                 .eq(SuperAgentDocumentProfile::getStatus, BusinessStatus.YES.getCode())
                 .eq(SuperAgentDocumentProfile::getProfileStatus, 2))
             .stream()
             .collect(Collectors.toMap(SuperAgentDocumentProfile::getDocumentId, item -> item, (left, right) -> right));
-        Map<String, Map<Long, SuperAgentTopicDocumentRelation>> topicRelationMap = topicDocumentRelationMapper.selectList(
+        List<SuperAgentKnowledgeTopicNode> allTopics = topicNodeMapper.selectList(
+            new LambdaQueryWrapper<SuperAgentKnowledgeTopicNode>()
+                .eq(SuperAgentKnowledgeTopicNode::getStatus, BusinessStatus.YES.getCode()));
+        Map<String, SuperAgentKnowledgeTopicNode> topicMap = allTopics.stream()
+            .collect(Collectors.toMap(SuperAgentKnowledgeTopicNode::getTopicCode, item -> item, (left, right) -> left));
+        Map<Long, String> documentScopeMap = allDocuments.stream()
+            .collect(Collectors.toMap(SuperAgentDocument::getId,
+                item -> StrUtil.blankToDefault(item.getKnowledgeScopeCode(), ""), (left, right) -> left));
+        Map<String, Map<Long, SuperAgentTopicDocumentRelation>> relationByTopic = topicDocumentRelationMapper.selectList(
                 new LambdaQueryWrapper<SuperAgentTopicDocumentRelation>()
                     .eq(SuperAgentTopicDocumentRelation::getStatus, BusinessStatus.YES.getCode()))
             .stream()
             .collect(Collectors.groupingBy(SuperAgentTopicDocumentRelation::getTopicCode,
                 Collectors.toMap(SuperAgentTopicDocumentRelation::getDocumentId, item -> item, (left, right) -> right)));
-        String topScopeCode = scopeCandidates.isEmpty() ? "" : scopeCandidates.get(0).getScopeCode();
-        String topTopicCode = topicCandidates.isEmpty() ? "" : topicCandidates.get(0).getTopicCode();
+        Map<Long, List<String>> topicNamesByDocument = new LinkedHashMap<>();
+        relationByTopic.forEach((topicCode, relations) -> {
+            SuperAgentKnowledgeTopicNode topic = topicMap.get(topicCode);
+            if (topic == null || StrUtil.isBlank(topic.getTopicName())) {
+                return;
+            }
+            relations.keySet().forEach(documentId -> {
+                String documentScope = documentScopeMap.get(documentId);
+                if (StrUtil.isNotBlank(documentScope) && !Objects.equals(documentScope, topic.getScopeCode())) {
+                    return;
+                }
+                topicNamesByDocument.computeIfAbsent(documentId, ignored -> new ArrayList<>()).add(topic.getTopicName());
+            });
+        });
+        Map<Long, Double> topicRelevanceByDocument = buildTopicRelevanceByDocument(
+            topicCandidates,
+            relationByTopic,
+            documentScopeMap
+        );
         List<DocumentRouteMaterial> materials = documents.stream()
-            .map(document -> buildDocumentRouteMaterial(document, profileMap.get(document.getId())))
-            .toList();
-        List<Double> semanticScores = computeSemanticScores(queryContext, materials.stream().map(DocumentRouteMaterial::routeText).toList());
-        Map<Long, Double> lexicalScores = searchLexicalScores(queryContext.routingText(), "document", 5).stream()
-            .filter(hit -> hit.documentId() != null)
-            .collect(Collectors.toMap(KnowledgeRouteIndexService.RouteLexicalHit::documentId, KnowledgeRouteIndexService.RouteLexicalHit::score, (left, right) -> left));
-        return documents.stream()
-            .map(document -> buildDocumentCandidate(
-                queryContext,
+            .map(document -> buildDocumentRouteMaterial(
                 document,
                 profileMap.get(document.getId()),
-                topScopeCode,
-                topTopicCode,
-                topicRelationMap,
-                materials,
-                semanticScores,
-                lexicalScores
+                topicNamesByDocument.getOrDefault(document.getId(), List.of())
             ))
-            .filter(candidate -> candidate.getScore().compareTo(BigDecimal.ZERO) > 0 || queryContext.semanticEnabled())
-            .sorted((left, right) -> right.getScore().compareTo(left.getScore()))
-            .limit(5)
             .toList();
-    }
-
-    private DocumentRouteCandidate buildDocumentCandidate(RouteQueryContext queryContext,
-                                                          SuperAgentDocument document,
-                                                          SuperAgentDocumentProfile profile,
-                                                          String topScopeCode,
-                                                          String topTopicCode,
-                                                          Map<String, Map<Long, SuperAgentTopicDocumentRelation>> topicRelationMap,
-                                                          List<DocumentRouteMaterial> materials,
-                                                          List<Double> semanticScores,
-                                                          Map<Long, Double> lexicalScores) {
-        int materialIndex = findMaterialIndex(materials, document.getId());
-        String routeText = materialIndex >= 0 ? materials.get(materialIndex).routeText() : join(
-            document.getDocumentName(),
-            document.getKnowledgeScopeName(),
-            document.getKnowledgeScopeCode(),
-            document.getBusinessCategory(),
-            document.getDocumentTags()
-        );
-        double semanticScore = materialIndex >= 0 && materialIndex < semanticScores.size() ? semanticScores.get(materialIndex) : 0D;
-        double score = semanticMainScore(semanticScore)
-            + lexicalAssist(lexicalScores.get(document.getId()))
-            + keywordEntityAssist(queryContext.queryTerms(), routeText);
-        if (StrUtil.isNotBlank(topScopeCode) && topScopeCode.equals(document.getKnowledgeScopeCode())) {
-            score += 15D;
-        }
-        if (StrUtil.isNotBlank(topTopicCode)) {
-            Map<Long, SuperAgentTopicDocumentRelation> relationMap = topicRelationMap.get(topTopicCode);
-            if (relationMap != null) {
-                SuperAgentTopicDocumentRelation relation = relationMap.get(document.getId());
-                if (relation != null && relation.getRelationScore() != null) {
-                    score += relation.getRelationScore().doubleValue() * 20D;
-                }
+        List<Double> cosineScores = computeSemanticScores(queryContext, materials.stream().map(DocumentRouteMaterial::routeText).toList());
+        boolean semanticAvailable = queryContext.semanticEnabled() && cosineScores.size() == materials.size();
+        Map<Long, Double> lexicalScores = searchLexicalScores(queryContext.routingText(), "document", 10).stream()
+            .filter(hit -> hit.documentId() != null)
+            .collect(Collectors.toMap(KnowledgeRouteIndexService.RouteLexicalHit::documentId, KnowledgeRouteIndexService.RouteLexicalHit::score, (left, right) -> left));
+        List<DocumentRouteCandidate> candidates = new ArrayList<>(documents.size());
+        for (int index = 0; index < documents.size(); index++) {
+            SuperAgentDocument document = documents.get(index);
+            DocumentRouteMaterial material = materials.get(index);
+            double semanticScore = semanticAvailable
+                ? semanticUnit(cosineScores.get(index), config)
+                : 0D;
+            KnowledgeRouteScoringSupport.LexicalEvidence localLexical = KnowledgeRouteScoringSupport.lexicalEvidence(
+                queryContext.routingText(),
+                material.routeText(),
+                material.aliases()
+            );
+            double externalLexical = KnowledgeRouteScoringSupport.normalizedExternalLexical(
+                lexicalScores.getOrDefault(document.getId(), 0D),
+                config.getEsLexicalSaturation()
+            );
+            double lexicalScore = Math.max(localLexical.score(), externalLexical);
+            double documentScopeScore = scopeScoreMap.getOrDefault(
+                StrUtil.blankToDefault(document.getKnowledgeScopeCode(), ""), 0D);
+            double scopeRelevance = topScopeScore <= 0D ? 0D : documentScopeScore / topScopeScore;
+            double topicRelevance = topicRelevanceByDocument.getOrDefault(document.getId(), 0D);
+            double score = KnowledgeRouteScoringSupport.weightedScore(
+                new double[]{
+                    semanticAvailable ? config.getDocumentSemanticWeight() : 0D,
+                    config.getDocumentLexicalWeight(),
+                    scopedCandidates.isEmpty() ? 0D : config.getDocumentScopeWeight(),
+                    topicCandidates == null || topicCandidates.isEmpty() ? 0D : config.getDocumentTopicWeight()
+                },
+                new double[]{semanticScore, lexicalScore, scopeRelevance, topicRelevance}
+            );
+            if (score <= 0D) {
+                continue;
             }
-        }
-        if (score <= 0D && !queryContext.semanticEnabled()) {
-            return new DocumentRouteCandidate(
+            candidates.add(new DocumentRouteCandidate(
                 String.valueOf(document.getId()),
                 document.getDocumentName(),
                 document.getLastIndexTaskId() == null ? "" : String.valueOf(document.getLastIndexTaskId()),
@@ -395,21 +487,19 @@ public class KnowledgeRouteServiceImpl implements KnowledgeRouteService {
                 StrUtil.blankToDefault(document.getKnowledgeScopeName(), ""),
                 StrUtil.blankToDefault(document.getBusinessCategory(), ""),
                 StrUtil.blankToDefault(document.getDocumentTags(), ""),
-                BigDecimal.ZERO,
-                "未命中路由关键词"
-            );
+                scoreToBigDecimal(score),
+                "语义=" + round(semanticScore)
+                    + "；词面=" + round(lexicalScore)
+                    + "；知识域对齐=" + round(scopeRelevance)
+                    + "；主题关联=" + round(topicRelevance)
+                    + (localLexical.aliasHit() ? "；命中别名=" + String.join("、", localLexical.matches()) : "")
+                    + (scopeFallback ? "；候选知识域无文档，已回退全局语义" : "")
+            ));
         }
-        return new DocumentRouteCandidate(
-            String.valueOf(document.getId()),
-            document.getDocumentName(),
-            document.getLastIndexTaskId() == null ? "" : String.valueOf(document.getLastIndexTaskId()),
-            StrUtil.blankToDefault(document.getKnowledgeScopeCode(), ""),
-            StrUtil.blankToDefault(document.getKnowledgeScopeName(), ""),
-            StrUtil.blankToDefault(document.getBusinessCategory(), ""),
-            StrUtil.blankToDefault(document.getDocumentTags(), ""),
-            scoreToBigDecimal(score),
-            buildReason(queryContext.queryTerms(), routeText, semanticScore)
-        );
+        return candidates.stream()
+            .sorted(Comparator.comparing(DocumentRouteCandidate::getScore).reversed())
+            .limit(config.getDocumentCandidateLimit())
+            .toList();
     }
 
     private RouteQueryContext buildQueryContext(String question, String rewriteQuestion) {
@@ -437,67 +527,101 @@ public class KnowledgeRouteServiceImpl implements KnowledgeRouteService {
         return original + " " + rewritten;
     }
 
-    private List<ScopeRouteCandidate> buildScopeCandidates(RouteQueryContext queryContext,
-                                                           List<SuperAgentKnowledgeScopeNode> nodes,
-                                                           List<String> routeTexts,
-                                                           List<Double> semanticScores,
-                                                           Map<String, Double> lexicalScores) {
-        List<ScopeRouteCandidate> candidates = new ArrayList<>(nodes.size());
-        for (int index = 0; index < nodes.size(); index++) {
-            SuperAgentKnowledgeScopeNode node = nodes.get(index);
-            String routeText = routeTexts.get(index);
-            double finalScore = semanticMainScore(semanticScores.get(index))
-                + lexicalAssist(lexicalScores.get(node.getScopeCode()))
-                + keywordEntityAssist(queryContext.queryTerms(), routeText);
-            if (finalScore > 0D || semanticScores.get(index) > 0D) {
-                candidates.add(new ScopeRouteCandidate(
-                    node.getScopeCode(),
-                    node.getScopeName(),
-                    scoreToBigDecimal(finalScore),
-                    buildReason(queryContext.queryTerms(), routeText, semanticScores.get(index))
-                ));
-            }
-        }
-        return candidates.stream()
-            .sorted((left, right) -> right.getScore().compareTo(left.getScore()))
-            .limit(5)
-            .toList();
+    private String buildScopeRouteText(SuperAgentKnowledgeScopeNode scope) {
+        return join(
+            scope.getScopeName(),
+            scope.getDescription(),
+            scope.getAliases(),
+            scope.getExamples()
+        );
     }
 
-    private DocumentRouteMaterial buildDocumentRouteMaterial(SuperAgentDocument document, SuperAgentDocumentProfile profile) {
+    private String buildTopicRouteText(SuperAgentKnowledgeTopicNode topic, String parentScopeName) {
+        return join(
+            parentScopeName,
+            topic.getTopicName(),
+            topic.getDescription(),
+            topic.getAliases(),
+            topic.getExamples()
+        );
+    }
+
+    private DocumentRouteMaterial buildDocumentRouteMaterial(SuperAgentDocument document,
+                                                             SuperAgentDocumentProfile profile,
+                                                             List<String> topicNames) {
+        List<String> aliases = new ArrayList<>();
+        aliases.add(document.getDocumentName());
+        aliases.addAll(parseList(document.getDocumentTags()));
+        aliases.addAll(topicNames);
         return new DocumentRouteMaterial(
             document.getId(),
             join(
                 document.getDocumentName(),
                 document.getKnowledgeScopeName(),
-                document.getKnowledgeScopeCode(),
-                document.getBusinessCategory(),
                 document.getDocumentTags(),
                 profile == null ? "" : profile.getDocumentSummary(),
                 profile == null ? "" : profile.getCoreTopics(),
-                profile == null ? "" : profile.getExampleQuestions(),
-                profile == null ? "" : profile.getDocumentType()
-            )
+                String.join(" ", topicNames)
+            ),
+            aliases.stream().filter(StrUtil::isNotBlank).distinct().toList()
         );
     }
 
-    private int findMaterialIndex(List<DocumentRouteMaterial> materials, Long documentId) {
-        for (int index = 0; index < materials.size(); index++) {
-            if (Objects.equals(materials.get(index).documentId(), documentId)) {
-                return index;
+    private Map<Long, Double> buildTopicRelevanceByDocument(
+        List<TopicRouteCandidate> topicCandidates,
+        Map<String, Map<Long, SuperAgentTopicDocumentRelation>> relationByTopic,
+        Map<Long, String> documentScopeMap) {
+        if (topicCandidates == null || topicCandidates.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, Double> relevanceMap = new LinkedHashMap<>();
+        for (TopicRouteCandidate topic : topicCandidates) {
+            Map<Long, SuperAgentTopicDocumentRelation> relations = relationByTopic.get(topic.getTopicCode());
+            if (relations == null || relations.isEmpty()) {
+                continue;
+            }
+            double topicScore = topic.getScore() == null ? 0D : topic.getScore().doubleValue();
+            for (Map.Entry<Long, SuperAgentTopicDocumentRelation> entry : relations.entrySet()) {
+                String documentScope = documentScopeMap.get(entry.getKey());
+                if (StrUtil.isNotBlank(documentScope) && !Objects.equals(documentScope, topic.getScopeCode())) {
+                    continue;
+                }
+                SuperAgentTopicDocumentRelation relation = entry.getValue();
+                double relationScore = relation == null || relation.getRelationScore() == null
+                    ? 0D
+                    : KnowledgeRouteScoringSupport.clamp(relation.getRelationScore().doubleValue());
+                double relevance = relationScore * (0.70D + 0.30D * topicScore);
+                relevanceMap.merge(entry.getKey(), relevance, Math::max);
             }
         }
-        return -1;
+        return relevanceMap;
     }
 
-    private BigDecimal resolveConfidence(List<DocumentRouteCandidate> documents) {
+    private double semanticUnit(double similarity, DocumentManageProperties.KnowledgeRoute config) {
+        return KnowledgeRouteScoringSupport.semanticUnit(
+            similarity,
+            config.getCosineFloor(),
+            config.getCosineCeil()
+        );
+    }
+
+    private BigDecimal resolveConfidence(List<DocumentRouteCandidate> documents,
+                                         List<ScopeRouteCandidate> scopes,
+                                         List<TopicRouteCandidate> topics) {
         if (documents == null || documents.isEmpty()) {
             return BigDecimal.ZERO;
         }
+        DocumentManageProperties.KnowledgeRoute config = properties.getKnowledgeRoute();
         double top = documents.get(0).getScore().doubleValue();
         double second = documents.size() > 1 ? documents.get(1).getScore().doubleValue() : 0D;
-        double normalized = top / Math.max(10D, top + second + 5D);
-        return scoreToBigDecimal(normalized);
+        double gapRatio = KnowledgeRouteScoringSupport.marginRatio(top, second);
+        double topScope = scopes == null || scopes.isEmpty() ? 0D : scopes.get(0).getScore().doubleValue();
+        double topTopic = topics == null || topics.isEmpty() ? 0D : topics.get(0).getScore().doubleValue();
+        double confidence = config.getConfidenceDocumentWeight() * top
+            + config.getConfidenceGapWeight() * gapRatio
+            + config.getConfidenceScopeWeight() * topScope
+            + config.getConfidenceTopicWeight() * topTopic;
+        return scoreToBigDecimal(KnowledgeRouteScoringSupport.clamp(confidence));
     }
 
     private List<SuperAgentDocument> listRetrievableDocuments() {
@@ -506,36 +630,6 @@ public class KnowledgeRouteServiceImpl implements KnowledgeRouteService {
             .eq(SuperAgentDocument::getIndexStatus, DocumentIndexStatusEnum.BUILD_SUCCESS.getCode())
             .isNotNull(SuperAgentDocument::getLastIndexTaskId)
             .orderByAsc(SuperAgentDocument::getId));
-    }
-
-    private double lexicalScore(List<String> queryTerms, String content) {
-        String normalizedContent = normalize(content);
-        if (queryTerms.isEmpty() || normalizedContent.isBlank()) {
-            return 0D;
-        }
-        double score = 0D;
-        List<String> sortedTerms = queryTerms.stream()
-            .map(this::normalize)
-            .filter(StrUtil::isNotBlank)
-            .distinct()
-            .sorted(Comparator.comparingInt(String::length).reversed())
-            .toList();
-        List<String> matchedTerms = new ArrayList<>();
-        for (String term : sortedTerms) {
-            String normalizedTerm = normalize(term);
-            if (normalizedTerm.length() < 2) {
-                continue;
-            }
-            boolean coveredByLongerTerm = matchedTerms.stream().anyMatch(existing -> existing.contains(normalizedTerm));
-            if (coveredByLongerTerm) {
-                continue;
-            }
-            if (normalizedContent.contains(normalizedTerm)) {
-                matchedTerms.add(normalizedTerm);
-                score += lexicalWeight(normalizedTerm.length());
-            }
-        }
-        return score;
     }
 
     private List<KnowledgeRouteIndexService.RouteLexicalHit> searchLexicalScores(String routingText, String entityType, int size) {
@@ -577,25 +671,36 @@ public class KnowledgeRouteServiceImpl implements KnowledgeRouteService {
             .toList();
     }
 
+    private List<String> parseList(String raw) {
+        String normalized = StrUtil.blankToDefault(raw, "").trim();
+        if (normalized.isBlank()) {
+            return List.of();
+        }
+        if (normalized.startsWith("[")) {
+            return parseJsonArray(normalized);
+        }
+        return Arrays.stream(normalized.split("[,，、;；\\n]+"))
+            .map(String::trim)
+            .filter(StrUtil::isNotBlank)
+            .distinct()
+            .toList();
+    }
+
+    private List<String> identityAliases(String name, String rawAliases) {
+        List<String> aliases = new ArrayList<>();
+        if (StrUtil.isNotBlank(name)) {
+            aliases.add(name.trim());
+        }
+        aliases.addAll(parseList(rawAliases));
+        return aliases.stream().filter(StrUtil::isNotBlank).distinct().toList();
+    }
+
     private BigDecimal scoreToBigDecimal(double score) {
         return BigDecimal.valueOf(score).setScale(4, RoundingMode.HALF_UP);
     }
 
-    private String buildReason(List<String> queryTerms, String content, double semanticScore) {
-        List<String> matched = queryTerms.stream()
-            .filter(term -> normalize(content).contains(normalize(term)))
-            .limit(3)
-            .toList();
-        if (!matched.isEmpty()) {
-            return "命中关键词：" + String.join("、", matched);
-        }
-        if (semanticScore >= 0.55D) {
-            return "语义相似度高，基于文档画像与元数据召回";
-        }
-        if (semanticScore >= 0.35D) {
-            return "语义相近，采用保守扩范围召回";
-        }
-        return "基于文档画像与元数据综合召回";
+    private double round(double value) {
+        return Math.round(KnowledgeRouteScoringSupport.clamp(value) * 10000D) / 10000D;
     }
 
     private String join(String... values) {
@@ -605,9 +710,7 @@ public class KnowledgeRouteServiceImpl implements KnowledgeRouteService {
     }
 
     private String normalize(String value) {
-        return StrUtil.blankToDefault(value, "")
-            .replaceAll("[\\s>`*#_\\-，,。；;：:（）()“”\"'\\[\\]]+", "")
-            .toLowerCase(Locale.ROOT);
+        return KnowledgeRouteScoringSupport.normalize(value);
     }
 
     private String firstNonBlank(String primary, String fallback) {
@@ -615,10 +718,6 @@ public class KnowledgeRouteServiceImpl implements KnowledgeRouteService {
             return primary.trim();
         }
         return StrUtil.blankToDefault(fallback, "");
-    }
-
-    private String normalizeCode(String value) {
-        return normalize(value).replaceAll("[^a-z0-9]+", "_");
     }
 
     private float[] embedSingle(String text) {
@@ -688,80 +787,8 @@ public class KnowledgeRouteServiceImpl implements KnowledgeRouteService {
         return cosineSimilarity(queryContext.queryEmbedding(), routeEmbedding);
     }
 
-    private double semanticMainScore(double semanticScore) {
-        if (semanticScore <= 0.20D) {
-            return 0D;
-        }
-        return (semanticScore - 0.20D) * 50D;
-    }
-
-    private double lexicalAssist(Double lexicalScore) {
-        if (lexicalScore == null || lexicalScore <= 0D) {
-            return 0D;
-        }
-        return Math.min(10D, lexicalScore * 1.6D);
-    }
-
-    private double keywordEntityAssist(List<String> queryTerms, String routeText) {
-        if (queryTerms == null || queryTerms.isEmpty()) {
-            return 0D;
-        }
-        double score = 0D;
-        String normalizedContent = normalize(routeText);
-        for (String term : queryTerms) {
-            if (!looksLikeEntityTerm(term)) {
-                continue;
-            }
-            String normalizedTerm = normalize(term);
-            if (StrUtil.isBlank(normalizedTerm) || normalizedTerm.length() < 2) {
-                continue;
-            }
-            if (normalizedContent.contains(normalizedTerm)) {
-                score += 6D;
-            }
-        }
-        return score;
-    }
-
-    private boolean looksLikeEntityTerm(String term) {
-        if (StrUtil.isBlank(term)) {
-            return false;
-        }
-        String trimmed = term.trim();
-        return trimmed.matches(".*[A-Za-z].*")
-            || trimmed.matches(".*\\d.*")
-            || trimmed.length() <= 4;
-    }
-
     private double cosineSimilarity(float[] left, float[] right) {
-        if (left == null || right == null || left.length == 0 || right.length == 0 || left.length != right.length) {
-            return 0D;
-        }
-        double dot = 0D;
-        double leftNorm = 0D;
-        double rightNorm = 0D;
-        for (int index = 0; index < left.length; index++) {
-            dot += left[index] * right[index];
-            leftNorm += left[index] * left[index];
-            rightNorm += right[index] * right[index];
-        }
-        if (leftNorm <= 0D || rightNorm <= 0D) {
-            return 0D;
-        }
-        return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
-    }
-
-    private double lexicalWeight(int termLength) {
-        if (termLength >= 8) {
-            return 12D;
-        }
-        if (termLength >= 5) {
-            return 8D;
-        }
-        if (termLength >= 3) {
-            return 4D;
-        }
-        return 2D;
+        return KnowledgeRouteScoringSupport.cosineSimilarity(left, right);
     }
 
     private void expandChineseNgrams(Set<String> terms, String segment) {
@@ -788,7 +815,7 @@ public class KnowledgeRouteServiceImpl implements KnowledgeRouteService {
         if (confidence == null) {
             return topReason;
         }
-        if (confidence.compareTo(BigDecimal.valueOf(0.55D)) < 0) {
+        if (confidence.compareTo(BigDecimal.valueOf(properties.getKnowledgeRoute().getSuccessThreshold())) < 0) {
             return StrUtil.blankToDefault(topReason, "低置信度，已进入保守扩范围候选");
         }
         return topReason;
@@ -828,18 +855,6 @@ public class KnowledgeRouteServiceImpl implements KnowledgeRouteService {
         }
     }
 
-    private static final class TopicAccumulator {
-        private final String topicName;
-        private final String scopeCode;
-        private double maxScore;
-        private String reason = "";
-
-        private TopicAccumulator(String topicName, String scopeCode) {
-            this.topicName = topicName;
-            this.scopeCode = scopeCode;
-        }
-    }
-
     private record RouteQueryContext(String originalQuestion,
                                      String rewriteQuestion,
                                      String routingText,
@@ -850,6 +865,8 @@ public class KnowledgeRouteServiceImpl implements KnowledgeRouteService {
         }
     }
 
-    private record DocumentRouteMaterial(Long documentId, String routeText) {
+    private record DocumentRouteMaterial(Long documentId,
+                                         String routeText,
+                                         List<String> aliases) {
     }
 }

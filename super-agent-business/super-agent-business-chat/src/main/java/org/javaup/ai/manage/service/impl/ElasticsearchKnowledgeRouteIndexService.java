@@ -39,6 +39,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
@@ -234,6 +235,9 @@ public class ElasticsearchKnowledgeRouteIndexService implements KnowledgeRouteIn
             .collect(Collectors.toMap(SuperAgentDocumentProfile::getDocumentId, item -> item, (left, right) -> right));
         Map<String, List<SuperAgentKnowledgeTopicNode>> topicByScope = topics.stream()
             .collect(Collectors.groupingBy(SuperAgentKnowledgeTopicNode::getScopeCode));
+        Map<String, String> scopeNameMap = scopes.stream()
+            .collect(Collectors.toMap(SuperAgentKnowledgeScopeNode::getScopeCode,
+                SuperAgentKnowledgeScopeNode::getScopeName, (left, right) -> left));
         Map<String, List<SuperAgentTopicDocumentRelation>> relationByTopic = topicDocumentRelationMapper.selectList(
                 new LambdaQueryWrapper<SuperAgentTopicDocumentRelation>()
                     .eq(SuperAgentTopicDocumentRelation::getStatus, BusinessStatus.YES.getCode()))
@@ -278,24 +282,29 @@ public class ElasticsearchKnowledgeRouteIndexService implements KnowledgeRouteIn
                 .descriptionText(safeText(topic.getDescription()))
                 .aliasesText(safeText(topic.getAliases()))
                 .examplesText(safeText(topic.getExamples()))
-                .summaryText(join(topic.getAnswerShape(), topic.getExecutionPreference()))
+                .summaryText(safeText(scopeNameMap.get(topic.getScopeCode())))
                 .routeText(join(
-                    topic.getTopicCode(),
+                    scopeNameMap.get(topic.getScopeCode()),
                     topic.getTopicName(),
                     topic.getDescription(),
                     topic.getAliases(),
-                    topic.getExamples(),
-                    topic.getAnswerShape(),
-                    topic.getExecutionPreference()))
-                .entityTerms(extractEntityTerms(join(topic.getTopicCode(), topic.getTopicName(), topic.getAliases())))
+                    topic.getExamples()))
+                .entityTerms(extractEntityTerms(join(topic.getTopicName(), topic.getAliases())))
                 .tags(tags)
                 .build());
         }
 
-        Map<Long, SuperAgentKnowledgeTopicNode> topicDocumentMap = new LinkedHashMap<>();
+        Map<Long, String> documentScopeMap = documents.stream()
+            .collect(Collectors.toMap(SuperAgentDocument::getId,
+                item -> safeText(item.getKnowledgeScopeCode()), (left, right) -> left));
+        Map<Long, List<SuperAgentKnowledgeTopicNode>> topicsByDocument = new LinkedHashMap<>();
         for (SuperAgentKnowledgeTopicNode topic : topics) {
             for (SuperAgentTopicDocumentRelation relation : relationByTopic.getOrDefault(topic.getTopicCode(), List.of())) {
-                topicDocumentMap.put(relation.getDocumentId(), topic);
+                String documentScope = documentScopeMap.get(relation.getDocumentId());
+                if (StrUtil.isNotBlank(documentScope) && !Objects.equals(documentScope, topic.getScopeCode())) {
+                    continue;
+                }
+                topicsByDocument.computeIfAbsent(relation.getDocumentId(), ignored -> new ArrayList<>()).add(topic);
             }
         }
 
@@ -305,21 +314,12 @@ public class ElasticsearchKnowledgeRouteIndexService implements KnowledgeRouteIn
             parseCommaText(document.getDocumentTags()).forEach(item -> addUnique(tags, item));
             if (profile != null) {
                 parseJsonArray(profile.getCoreTopics()).forEach(item -> addUnique(tags, item));
-                parseJsonArray(profile.getExampleQuestions()).forEach(item -> addUnique(tags, item));
             }
-            relationByTopic.forEach((topicCode, relations) -> relations.stream()
-                .filter(relation -> document.getId().equals(relation.getDocumentId()))
-                .findFirst()
-                .ifPresent(relation -> {
-                    SuperAgentKnowledgeTopicNode topic = topics.stream()
-                        .filter(item -> topicCode.equals(item.getTopicCode()))
-                        .findFirst()
-                        .orElse(null);
-                    if (topic != null) {
-                        addUnique(tags, topic.getTopicName());
-                        parseCommaText(topic.getAliases()).forEach(item -> addUnique(tags, item));
-                    }
-                }));
+            List<SuperAgentKnowledgeTopicNode> documentTopics = topicsByDocument.getOrDefault(document.getId(), List.of());
+            documentTopics.forEach(topic -> {
+                addUnique(tags, topic.getTopicName());
+                parseCommaText(topic.getAliases()).forEach(item -> addUnique(tags, item));
+            });
             records.add(KnowledgeRouteIndexRecord.builder()
                 .routeId("document:" + document.getId())
                 .entityType("document")
@@ -330,20 +330,17 @@ public class ElasticsearchKnowledgeRouteIndexService implements KnowledgeRouteIn
                 .documentName(safeText(document.getDocumentName()))
                 .businessCategory(safeText(document.getBusinessCategory()))
                 .displayName(safeText(document.getDocumentName()))
-                .descriptionText(profile == null ? "" : safeText(profile.getDocumentType()))
+                .descriptionText(profile == null ? "" : safeText(profile.getCoreTopics()))
                 .aliasesText("")
-                .examplesText(profile == null ? "" : joinJsonLike(parseJsonArray(profile.getExampleQuestions())))
+                .examplesText("")
                 .summaryText(profile == null ? "" : safeText(profile.getDocumentSummary()))
                 .routeText(join(
                     document.getDocumentName(),
-                    document.getKnowledgeScopeCode(),
                     document.getKnowledgeScopeName(),
-                    document.getBusinessCategory(),
                     document.getDocumentTags(),
                     profile == null ? "" : profile.getDocumentSummary(),
                     profile == null ? "" : profile.getCoreTopics(),
-                    profile == null ? "" : profile.getExampleQuestions(),
-                    profile == null ? "" : profile.getDocumentType()
+                    documentTopics.stream().map(SuperAgentKnowledgeTopicNode::getTopicName).collect(Collectors.joining(" "))
                 ))
                 .entityTerms(extractEntityTerms(join(document.getDocumentName(), document.getDocumentTags(), document.getKnowledgeScopeName())))
                 .tags(tags)
@@ -396,10 +393,6 @@ public class ElasticsearchKnowledgeRouteIndexService implements KnowledgeRouteIn
             .map(String::trim)
             .filter(StrUtil::isNotBlank)
             .toList();
-    }
-
-    private String joinJsonLike(List<String> values) {
-        return values == null || values.isEmpty() ? "" : String.join(" ", values);
     }
 
     private String join(String... values) {

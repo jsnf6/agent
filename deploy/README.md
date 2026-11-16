@@ -69,17 +69,17 @@ docker compose stop backend     # 释放 9082
 | 组件 | 宿主机地址 | 说明 |
 | --- | --- | --- |
 | 前端 | http://localhost:8088 | 两种方式都用它；反代到 `BACKEND_UPSTREAM` |
-| 管理台登录 | http://localhost:8088/admin/login | 账号 `admin` / `admin123456` |
+| 管理台登录 | http://localhost:8088/admin/login | 账号见 `.env` 的 `SUPER_AGENT_ADMIN_USERNAME` / `SUPER_AGENT_ADMIN_PASSWORD` |
 | 后端 | http://localhost:9082 | 容器版或 IDE 版，二选一（同时开就端口冲突） |
-| MySQL | localhost:13306 | root / 123456，映射端口由 `.env` 的 `MYSQL_PORT` 控制 |
-| Redis | localhost:6378 | 密码 123456 |
+| MySQL | localhost:13306 | root / `.env` 的 `MYSQL_ROOT_PASSWORD`，映射端口由 `.env` 的 `MYSQL_PORT` 控制 |
+| Redis | localhost:6378 | 密码见 `.env` 的 `REDIS_PASSWORD` |
 | Kafka | localhost:9092 | 容器内为 `kafka:9092`，宿主机映射 9092→29092 |
-| Elasticsearch | http://localhost:9201 | elastic / ***REMOVED*** |
-| Neo4j Browser | http://localhost:7474 | neo4j / 12345678，bolt 7687 |
-| PGVector | localhost:5432 | postgres / postgres，库 `super_agent_pgvector` |
-| MinIO 控制台 | http://localhost:9001 | minioadmin / minioadmin，API 端口 9000 |
+| Elasticsearch | http://localhost:9201 | elastic / `.env` 的 `ES_PASSWORD` |
+| Neo4j Browser | http://localhost:7474 | neo4j / `.env` 的 `NEO4J_PASSWORD`，bolt 7687 |
+| PGVector | localhost:5432 | postgres / 对应环境变量密码，库 `super_agent_pgvector` |
+| MinIO 控制台 | http://localhost:9001 | `.env` 的 `MINIO_USER` / `MINIO_PASSWORD`，API 端口 9000 |
 | Docling | http://localhost:5001 | docling-serve（含 UI）；后端容器通过 `docling:5001` 访问 |
-| Kibana | http://localhost:5601 | elastic / ***REMOVED***，ES 可视化；需 `--profile viz` |
+| Kibana | http://localhost:5601 | elastic / `.env` 的 `ES_PASSWORD`，ES 可视化；需 `--profile viz` |
 
 ## 四、常用命令
 
@@ -135,6 +135,30 @@ docker compose logs -f kibana
 - 模型：首次启动从 `HF_ENDPOINT`（默认 `https://hf-mirror.com`）下载，缓存在 `sa-docling-cache` 卷（容器内 `/opt/app-root/src/.cache`），重建容器不会重复下载。
 - 开关：`.env` 的 `DOCUMENT_STRUCTURE_PROVIDER=docling` 启用 Docling，改为 `tika` 回退到原 Tika 规则解析；单次 Docling 调用失败时后端默认自动回退 Tika。
 
+### 浏览器工具 / Chromium
+
+后端已引入 Playwright Java，并封装了按 `conversationId` 隔离的浏览器会话。
+
+- 本地运行前执行一次 Chromium 安装：
+
+```powershell
+$env:JAVA_HOME='E:\abjava'
+E:\Maven\apache-maven-3.9.12\bin\mvn.cmd -f super-agent-business\super-agent-business-chat\pom.xml `
+  org.codehaus.mojo:exec-maven-plugin:3.7.0:java `
+  "-Dexec.mainClass=com.microsoft.playwright.CLI" `
+  "-Dexec.args=install chromium"
+```
+
+- 容器镜像 `deploy/backend/Dockerfile` 会在构建阶段安装 Chromium 和运行依赖，浏览器缓存在 `/ms-playwright`。
+- `deploy/docker-compose.yml` 为后端设置了 `shm_size: 1g`，并通过 `APP_BROWSER_NO_SANDBOX=true` 允许容器内 Chromium 启动。
+- Dockerfile 的浏览器安装层使用 BuildKit 缓存挂载，后续只更新业务 jar 时不会重复下载 Chromium（首次构建约 270MB）。
+- 容器内自检：`docker run --rm --entrypoint sh super-agent-backend:0.0.1 -c "/ms-playwright/chromium-1169/chrome-linux/chrome --version"`。
+- `BrowserTools` 已通过 `BrowserToolConfiguration` 注册进业务 `ReactAgent`，支持 `browser_open`、`browser_snapshot`、`browser_click`、`browser_type`、`browser_press`、`browser_back`、`browser_close`。
+- `app.browser.enabled=false` 可以完全关闭浏览器工具；关闭后不会注册工具，也不会创建 Chromium 会话。
+- 每个工具都有单轮和单会话调用上限，可通过 `app.browser.max-*-calls-per-run/thread` 调整，避免模型反复点击或刷新页面。
+- 浏览器会拦截导航、子资源和 WebSocket 请求中的本机、内网、链路本地、CGNAT 和云元数据地址；同时禁用 Service Worker 和文件下载，防止绕过请求拦截或写入任意文件。
+- 需要访问企业内网页面时，在 `app.browser.allowed-hosts` 中显式配置白名单域名；白名单内的主机允许访问私网地址，白名单页面的 CDN 子资源仍可正常加载。
+
 ### Kibana 查看 ES 数据
 
 Kibana 放在 `viz` profile 中，按需启动：
@@ -185,7 +209,7 @@ GET super-agent-document-navigation/_search
 
 ## 七、首次使用建议
 
-1. 打开 http://localhost:8088/admin/login ，用 `admin / admin123456` 登录。
+1. 打开 http://localhost:8088/admin/login ，用 `.env` 中的 `SUPER_AGENT_ADMIN_USERNAME` / `SUPER_AGENT_ADMIN_PASSWORD` 登录。
 2. 在「文档接入」里上传 `需要的例子演示/` 下的示例文档。
 3. 在文档详情页完成「确认策略方案」→「构建索引执行」，等 Kafka 异步流水线跑完。
 4. 到对话页选择文档提问。

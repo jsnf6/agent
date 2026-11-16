@@ -32,6 +32,8 @@ public class DocumentManageProperties {
 
     private KnowledgeBinding knowledgeBinding = new KnowledgeBinding();
 
+    private KnowledgeRoute knowledgeRoute = new KnowledgeRoute();
+
     @Data
     public static class Minio {
         private String endpoint = "http://127.0.0.1:9000";
@@ -214,5 +216,57 @@ public class DocumentManageProperties {
         private Integer sectionLeadChars = 300;
 
         private Integer sectionItemLimit = 8;
+    }
+
+    @Data
+    public static class KnowledgeRoute {
+
+        private Double cosineFloor = 0.25D;
+
+        private Double cosineCeil = 0.80D;
+
+        private Double scopeSemanticWeight = 0.70D;
+
+        private Double scopeLexicalWeight = 0.30D;
+
+        private Double topicSemanticWeight = 0.75D;
+
+        private Double topicLexicalWeight = 0.25D;
+
+        private Double topicOwnWeight = 0.70D;
+
+        private Double topicParentWeight = 0.30D;
+
+        private Double documentSemanticWeight = 0.55D;
+
+        private Double documentLexicalWeight = 0.20D;
+
+        private Double documentScopeWeight = 0.15D;
+
+        private Double documentTopicWeight = 0.10D;
+
+        private Double confidenceDocumentWeight = 0.55D;
+
+        private Double confidenceGapWeight = 0.25D;
+
+        private Double confidenceScopeWeight = 0.12D;
+
+        private Double confidenceTopicWeight = 0.08D;
+
+        private Double esLexicalSaturation = 20D;
+
+        private Double successThreshold = 0.55D;
+
+        private Double clarificationRelativeGap = 0.15D;
+
+        private Integer scopeCandidateLimit = 3;
+
+        private Integer topicScopeLimit = 3;
+
+        private Integer topicCandidateLimit = 8;
+
+        private Integer documentScopeLimit = 3;
+
+        private Integer documentCandidateLimit = 5;
     }
 }

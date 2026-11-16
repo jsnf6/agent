@@ -207,6 +207,8 @@ services:
     image: super-agent-backend:0.0.1
     container_name: sa-backend
     restart: unless-stopped
+    # Chromium 多进程运行需要足够的共享内存。
+    shm_size: "1g"
     depends_on:
       mysql:
         condition: service_healthy
@@ -227,6 +229,11 @@ services:
     environment:
       TZ: Asia/Shanghai
       JAVA_OPTS: -Xms512m -Xmx1536m -Dfile.encoding=UTF-8
+      # Chromium 由 deploy/backend/Dockerfile 在构建阶段安装，这里指定其运行时目录。
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+      # 容器内以 root 运行时 Chromium 需要关闭 sandbox。
+      APP_BROWSER_NO_SANDBOX: "true"
+      APP_BROWSER_HEADLESS: "true"
       ALI_BAI_LIAN_API_KEY: ${ALI_BAI_LIAN_API_KEY}
       TAVILY_API_KEY: ${TAVILY_API_KEY}
       NEO4J_PASSWORD: ${NEO4J_PASSWORD}

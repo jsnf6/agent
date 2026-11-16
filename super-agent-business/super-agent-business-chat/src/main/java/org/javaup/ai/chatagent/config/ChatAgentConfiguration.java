@@ -1,8 +1,14 @@
 package org.javaup.ai.chatagent.config;
 
+import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Stream;
+
 import javax.sql.DataSource;
 
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
+import com.alibaba.cloud.ai.graph.agent.hook.Hook;
 import com.alibaba.cloud.ai.graph.agent.hook.modelcalllimit.ModelCallLimitHook;
 import com.alibaba.cloud.ai.graph.agent.hook.toolcalllimit.ToolCallLimitHook;
 import com.alibaba.cloud.ai.graph.agent.interceptor.toolerror.ToolErrorInterceptor;
@@ -13,9 +19,12 @@ import org.javaup.ai.chatagent.support.DashScopeCompatibilityInterceptor;
 import org.javaup.ai.chatagent.support.TavilyToolInputFallbackInterceptor;
 import org.javaup.ai.chatagent.tool.TavilySearchRequest;
 import org.javaup.ai.chatagent.tool.TavilySearchTool;
+import org.javaup.ai.chatagent.tool.browser.BrowserProperties;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.ai.tool.function.FunctionToolCallback;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -26,7 +35,7 @@ import org.springframework.context.annotation.Configuration;
  * @author: 阿星不是程序员
  **/
 @Configuration
-@EnableConfigurationProperties({ChatAgentProperties.class, TavilySearchProperties.class})
+@EnableConfigurationProperties({ChatAgentProperties.class, TavilySearchProperties.class, BrowserProperties.class})
 public class ChatAgentConfiguration {
 
     @Bean
@@ -52,34 +61,67 @@ public class ChatAgentConfiguration {
     public ReactAgent businessChatReactAgent(ChatModel chatModel,
                                              MysqlSaver mysqlCheckpointSaver,
                                              ToolCallback tavilySearchToolCallback,
+                                             ObjectProvider<ToolCallbackProvider> browserToolCallbackProviders,
+                                             BrowserProperties browserProperties,
                                              ChatAgentProperties chatAgentProperties,
                                              DashScopeCompatibilityInterceptor dashScopeCompatibilityInterceptor,
                                              TavilyToolInputFallbackInterceptor tavilyToolInputFallbackInterceptor) {
+        ToolCallbackProvider browserToolCallbackProvider = browserToolCallbackProviders.orderedStream()
+            .findFirst()
+            .orElse(null);
+        ToolCallback[] browserToolCallbacks = browserToolCallbackProvider == null
+            ? new ToolCallback[0]
+            : browserToolCallbackProvider.getToolCallbacks();
+
+        List<Hook> hooks = new ArrayList<>();
+        hooks.add(ModelCallLimitHook.builder()
+            .runLimit(chatAgentProperties.getMaxModelCallsPerRun())
+            .threadLimit(chatAgentProperties.getMaxModelCallsPerThread())
+            .exitBehavior(ModelCallLimitHook.ExitBehavior.END)
+            .build());
+        hooks.add(ToolCallLimitHook.builder()
+            .toolName("tavily_search")
+            .runLimit(chatAgentProperties.getMaxToolCallsPerRun())
+            .threadLimit(chatAgentProperties.getMaxToolCallsPerThread())
+            .exitBehavior(ToolCallLimitHook.ExitBehavior.END)
+            .build());
+        if (browserToolCallbackProvider != null) {
+            hooks.add(browserToolCallLimit("browser_open",
+                browserProperties.getMaxOpenCallsPerRun(),
+                browserProperties.getMaxOpenCallsPerThread()));
+            hooks.add(browserToolCallLimit("browser_snapshot",
+                browserProperties.getMaxSnapshotCallsPerRun(),
+                browserProperties.getMaxSnapshotCallsPerThread()));
+            hooks.add(browserToolCallLimit("browser_click",
+                browserProperties.getMaxActionCallsPerRun(),
+                browserProperties.getMaxActionCallsPerThread()));
+            hooks.add(browserToolCallLimit("browser_type",
+                browserProperties.getMaxTypeCallsPerRun(),
+                browserProperties.getMaxTypeCallsPerThread()));
+            hooks.add(browserToolCallLimit("browser_press",
+                browserProperties.getMaxActionCallsPerRun(),
+                browserProperties.getMaxActionCallsPerThread()));
+            hooks.add(browserToolCallLimit("browser_back",
+                browserProperties.getMaxActionCallsPerRun(),
+                browserProperties.getMaxActionCallsPerThread()));
+        }
+
         return ReactAgent.builder()
 
             .name("business_chat_agent")
             .model(chatModel)
             .instruction(chatAgentProperties.getSystemPrompt())
 
-            .tools(tavilySearchToolCallback)
+            .tools(Stream.concat(
+                    Stream.of(tavilySearchToolCallback),
+                    Arrays.stream(browserToolCallbacks))
+                .toArray(ToolCallback[]::new))
             .saver(mysqlCheckpointSaver)
 
             .parallelToolExecution(true)
             .maxParallelTools(4)
 
-            .hooks(
-                ModelCallLimitHook.builder()
-                    .runLimit(chatAgentProperties.getMaxModelCallsPerRun())
-                    .threadLimit(chatAgentProperties.getMaxModelCallsPerThread())
-                    .exitBehavior(ModelCallLimitHook.ExitBehavior.END)
-                    .build(),
-                ToolCallLimitHook.builder()
-                    .toolName("tavily_search")
-                    .runLimit(chatAgentProperties.getMaxToolCallsPerRun())
-                    .threadLimit(chatAgentProperties.getMaxToolCallsPerThread())
-                    .exitBehavior(ToolCallLimitHook.ExitBehavior.END)
-                    .build()
-            )
+            .hooks(hooks)
 
             .interceptors(
                 dashScopeCompatibilityInterceptor,
@@ -94,6 +136,17 @@ public class ChatAgentConfiguration {
                     .build(),
                 ToolErrorInterceptor.builder().build()
             )
+            .build();
+    }
+
+    private ToolCallLimitHook browserToolCallLimit(String toolName, int runLimit, int threadLimit) {
+        int normalizedRunLimit = Math.max(1, runLimit);
+        int normalizedThreadLimit = Math.max(normalizedRunLimit, threadLimit);
+        return ToolCallLimitHook.builder()
+            .toolName(toolName)
+            .runLimit(normalizedRunLimit)
+            .threadLimit(normalizedThreadLimit)
+            .exitBehavior(ToolCallLimitHook.ExitBehavior.END)
             .build();
     }
 }

@@ -16,6 +16,7 @@ import org.javaup.ai.chatagent.service.ConversationMemoryService;
 import org.javaup.ai.chatagent.service.ConversationTraceRecorder;
 import org.javaup.ai.chatagent.service.TaskInfo;
 import org.javaup.ai.chatagent.support.TimeSensitiveQueryHelper;
+import org.javaup.ai.manage.config.DocumentManageProperties;
 import org.javaup.ai.manage.model.KnowledgeDocumentDescriptor;
 import org.javaup.ai.manage.model.route.DocumentRouteCandidate;
 import org.javaup.ai.manage.model.route.KnowledgeRouteDecision;
@@ -60,6 +61,7 @@ public class ChatPreparationOrchestrator {
     );
 
     private final ChatRagProperties properties;
+    private final DocumentManageProperties documentManageProperties;
     private final ConversationMemoryService conversationMemoryService;
     private final AnswerHistoryContextAssembler answerHistoryContextAssembler;
     private final ChatQueryRewriteService chatQueryRewriteService;
@@ -68,6 +70,7 @@ public class ChatPreparationOrchestrator {
     private final DocumentKnowledgeService documentKnowledgeService;
 
     public ChatPreparationOrchestrator(ChatRagProperties properties,
+                                       DocumentManageProperties documentManageProperties,
                                        ConversationMemoryService conversationMemoryService,
                                        AnswerHistoryContextAssembler answerHistoryContextAssembler,
                                        ChatQueryRewriteService chatQueryRewriteService,
@@ -75,6 +78,7 @@ public class ChatPreparationOrchestrator {
                                        KnowledgeRouteService knowledgeRouteService,
                                        DocumentKnowledgeService documentKnowledgeService) {
         this.properties = properties;
+        this.documentManageProperties = documentManageProperties;
         this.conversationMemoryService = conversationMemoryService;
         this.answerHistoryContextAssembler = answerHistoryContextAssembler;
         this.chatQueryRewriteService = chatQueryRewriteService;
@@ -228,7 +232,7 @@ public class ChatPreparationOrchestrator {
             }
             boolean confidentTopDocument = routeDecision != null
                 && routeDecision.getConfidence() != null
-                && routeDecision.getConfidence().doubleValue() >= 0.55D;
+                && routeDecision.getConfidence().doubleValue() >= routeSuccessThreshold();
             DocumentRouteCandidate topDocument = confidentTopDocument && !candidateDocuments.isEmpty() ? candidateDocuments.get(0) : null;
             if (topDocument != null && StrUtil.isNotBlank(topDocument.getDocumentId()) && StrUtil.isNotBlank(topDocument.getLastIndexTaskId())) {
                 routedDocumentId = Long.valueOf(topDocument.getDocumentId());
@@ -517,7 +521,7 @@ public class ChatPreparationOrchestrator {
         if (candidates.isEmpty()) {
             return fallbackDocuments(question, rewriteQuestion, candidateLimit);
         }
-        if (routeDecision.getConfidence() != null && routeDecision.getConfidence().doubleValue() < 0.55D) {
+        if (routeDecision.getConfidence() != null && routeDecision.getConfidence().doubleValue() < routeSuccessThreshold()) {
             return mergeCandidates(candidates, fallbackDocuments(question, rewriteQuestion, candidateLimit), candidateLimit);
         }
         return candidates;
@@ -560,6 +564,10 @@ public class ChatPreparationOrchestrator {
         return merged.values().stream().limit(Math.max(1, limit)).toList();
     }
 
+    private double routeSuccessThreshold() {
+        return documentManageProperties.getKnowledgeRoute().getSuccessThreshold();
+    }
+
     private boolean shouldAskClarification(KnowledgeRouteDecision routeDecision,
                                            List<DocumentRouteCandidate> candidateDocuments) {
         if (candidateDocuments == null || candidateDocuments.isEmpty()) {
@@ -568,7 +576,7 @@ public class ChatPreparationOrchestrator {
         if (routeDecision == null || routeDecision.getDocuments() == null || routeDecision.getDocuments().isEmpty()) {
             return true;
         }
-        if (routeDecision.getConfidence() == null || routeDecision.getConfidence().doubleValue() < 0.55D) {
+        if (routeDecision.getConfidence() == null || routeDecision.getConfidence().doubleValue() < routeSuccessThreshold()) {
             return true;
         }
         if (candidateDocuments.size() < 2) {
@@ -579,7 +587,9 @@ public class ChatPreparationOrchestrator {
         if (topScore == null || secondScore == null) {
             return false;
         }
-        return topScore.subtract(secondScore).doubleValue() <= 3D
+        double top = topScore.doubleValue();
+        double relativeGap = top <= 0D ? 0D : (top - secondScore.doubleValue()) / top;
+        return relativeGap <= documentManageProperties.getKnowledgeRoute().getClarificationRelativeGap()
             && !Objects.equals(candidateDocuments.get(0).getKnowledgeScopeCode(), candidateDocuments.get(1).getKnowledgeScopeCode());
     }
 

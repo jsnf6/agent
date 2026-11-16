@@ -48,3 +48,13 @@ CLAUDE.md
 AGENTS.md
 
 document
+
+### Local secrets and OS metadata ###
+.env
+.env.*
+!.env.example
+!**/.env.example
+**/.env
+**/.env.local
+.DS_Store
+**/.DS_Store
