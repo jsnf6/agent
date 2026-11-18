@@ -3,9 +3,9 @@ package org.javaup.route.model;
 import java.util.Locale;
 
 /**
- * @program: 企业级别深度设计 AI Agent。添加 阿星不是程序员 微信，添加时备注 super 来获取项目的完整资料 
+ * @program:
  * @description: 路由意图枚举
- * @author: 阿星不是程序员
+ * @author:
  **/
 /**
  * 路由意图枚举。

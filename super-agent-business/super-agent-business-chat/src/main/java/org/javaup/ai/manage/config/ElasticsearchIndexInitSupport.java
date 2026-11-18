@@ -7,7 +7,7 @@ import java.io.IOException;
 /**
  * @program: 企业级别深度设计 AI Agent。
  * @description: Elasticsearch 索引初始化异常判定
- * @author: 阿星不是程序员
+ * @author:
  **/
 final class ElasticsearchIndexInitSupport {
 
